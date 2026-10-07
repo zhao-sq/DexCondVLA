@@ -108,7 +108,12 @@ def main(config_name: str, max_frames: int | None = None):
 
     norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
 
-    output_path = config.assets_dirs / data_config.repo_id
+    # asset_id is deliberately independent of repo_id. For local processors,
+    # repo_id can be an absolute dataset path and must never become the stats
+    # output directory.
+    if data_config.asset_id is None:
+        raise ValueError("Data config must have an asset_id for normalization statistics")
+    output_path = config.assets_dirs / data_config.asset_id
     print(f"Writing stats to: {output_path}")
     normalize.save(output_path, norm_stats)
 

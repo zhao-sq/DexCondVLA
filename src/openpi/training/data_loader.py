@@ -13,6 +13,7 @@ import torch
 
 import openpi.models.model as _model
 import openpi.training.config as _config
+import openpi.training.dataset_processors as dataset_processors
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
 
@@ -136,6 +137,15 @@ def create_torch_dataset(
         raise ValueError("Repo ID is not set. Cannot create dataset.")
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
+
+    if data_config.dataset_processor is not None:
+        return dataset_processors.create_dataset(
+            data_config.dataset_processor,
+            repo_id,
+            action_horizon=action_horizon,
+            model_config=model_config,
+            options=data_config.dataset_processor_options,
+        )
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(

@@ -1,5 +1,31 @@
 # π₀.₅ 四种官方 Fine-tune Recipe：什么时候分别使用
 
+## 已选定方案：Bench2Dex Task 26
+
+后续实现统一使用以下不可变约定：
+
+| 项目 | 选择 |
+|---|---|
+| Backbone / VLM | 冻结 SigLIP 与 Gemma VLM pipeline |
+| 可训练主体 | 仅 action expert |
+| Action projections | `action_in_proj` 与 `action_out_proj` 从零初始化并训练 |
+| Action dimension | 58 |
+| Action representation | Bench2Dex 原始 absolute joint-position command |
+| Main camera | `cam_overhead` → `base_0_rgb` |
+| Left wrist camera | `cam_wrist_left` → `left_wrist_0_rgb` |
+| Right wrist camera | `cam_wrist_right` → `right_wrist_0_rgb` |
+| Dataset | Task 26 `replay-generalization` 原生 HDF5 lazy loading |
+| Checkpoints | `/mnt/ssd1/szhao/DexTool/openpi_checkpoints` |
+| Logs / WandB | `/mnt/ssd1/szhao/DexTool/openpi_logs` |
+| Assets / cache | `/mnt/ssd1/szhao/DexTool/openpi_assets` |
+| Virtual environment | `/mnt/ssd1/szhao/DexTool/openpi_env` |
+
+数据管线已使用 Task 26 的 `episode_000000.hdf5` 端到端验证：homing 截断、有效帧过滤、三路 JPEG 解码、58 维 state/action、quantile normalization、224×224 resize、prompt tokenization 和 batching 均通过。完整 100 条数据也已通过 schema 扫描；`action_horizon=50` 时共有 59,038 个可训练 frame-start samples。
+
+> 注意：发布的 Task 26 全部 100 个 replay 文件均标记为 `meta/success=False` 和 `meta/demo_eligible=False`。当前 loader 与 Bench2Dex 官方 π₀.₅ loader 一样不按这两个字段过滤；在正式训练前需要单独决定是否接受这些 demonstrations，或向数据发布方确认 metadata 的含义。
+
+---
+
 你问的是这 **4 套官方 recipe 分别适合什么情况**：
 
 1. `pi05_libero`

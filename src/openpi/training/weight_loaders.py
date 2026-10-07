@@ -55,6 +55,47 @@ class CheckpointWeightLoader(WeightLoader):
 
 
 @dataclasses.dataclass(frozen=True)
+class ShapeCompatibleCheckpointWeightLoader(WeightLoader):
+    """Load matching checkpoint tensors and initialize selected new shapes.
+
+    This is intended for embodiment changes such as a new action dimension.
+    Shape mismatches must match one of ``allowed_mismatch_regexes``; all other
+    mismatches fail loudly so an accidental architecture change is not hidden.
+    """
+
+    params_path: str
+    allowed_mismatch_regexes: tuple[str, ...]
+
+    def load(self, params: at.Params) -> at.Params:
+        loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
+        flat_ref = flax.traverse_util.flatten_dict(params, sep="/")
+        flat_loaded = flax.traverse_util.flatten_dict(loaded_params, sep="/")
+        allowed = tuple(re.compile(pattern) for pattern in self.allowed_mismatch_regexes)
+        result = dict(flat_ref)
+        skipped: list[str] = []
+
+        for path, value in flat_loaded.items():
+            if path not in flat_ref:
+                continue
+            reference = flat_ref[path]
+            if tuple(value.shape) != tuple(reference.shape):
+                if not any(pattern.fullmatch(path) for pattern in allowed):
+                    raise ValueError(
+                        f"Unexpected checkpoint shape mismatch for {path}: "
+                        f"checkpoint={value.shape}, model={reference.shape}"
+                    )
+                skipped.append(f"{path}: checkpoint={value.shape}, model={reference.shape}")
+                continue
+            result[path] = value.astype(reference.dtype) if value.dtype != reference.dtype else value
+
+        if not skipped:
+            logger.warning("Shape-compatible loader did not skip any tensors")
+        for description in skipped:
+            logger.info("Initializing shape-changed parameter from scratch: %s", description)
+        return flax.traverse_util.unflatten_dict(result, sep="/")
+
+
+@dataclasses.dataclass(frozen=True)
 class PaliGemmaWeightLoader(WeightLoader):
     """Loads weights from the official PaliGemma checkpoint.
 

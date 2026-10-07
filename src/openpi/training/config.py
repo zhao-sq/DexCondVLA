@@ -18,9 +18,11 @@ import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
+import openpi.policies.bench2dex_policy as bench2dex_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.polaris_config as polaris_config
@@ -89,6 +91,12 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+
+    # Optional registered processor for a non-LeRobot on-disk format. When
+    # present, create_torch_dataset delegates dataset construction to this
+    # processor instead of interpreting repo_id as a LeRobot repository.
+    dataset_processor: str | None = None
+    dataset_processor_options: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -352,6 +360,37 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class Bench2DexDataConfig(DataConfigFactory):
+    """Configuration for reading Bench2Dex replay HDF5 files in-place."""
+
+    default_prompt: str | None = None
+    dataset_processor: str = "bench2dex_hdf5"
+    camera_names: tuple[str, str, str] = ("cam_overhead", "cam_wrist_left", "cam_wrist_right")
+    assets: AssetsConfig = dataclasses.field(default_factory=lambda: AssetsConfig(asset_id="bench2dex_task26"))
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        if model_config.action_dim != 58:
+            raise ValueError(f"Bench2Dex Task 26 requires action_dim=58, got {model_config.action_dim}")
+        data_transforms = _transforms.Group(
+            inputs=[bench2dex_policy.Bench2DexInputs(action_dim=model_config.action_dim)],
+            outputs=[bench2dex_policy.Bench2DexOutputs(action_dim=model_config.action_dim)],
+        )
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=("actions",),
+            dataset_processor=self.dataset_processor,
+            dataset_processor_options={
+                "camera_names": self.camera_names,
+                "prompt": self.default_prompt,
+            },
         )
 
 
@@ -760,6 +799,45 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    # Bench2Dex Task26: freeze the vision-language backbone and train only the
+    # 300M action expert plus the action input/output projections. The 58D
+    # projections are intentionally initialized from scratch by the
+    # shape-compatible checkpoint loader.
+    TrainConfig(
+        name="pi05_bench2dex_task26_action_expert",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=58,
+            action_horizon=50,
+            max_token_len=280,
+        ),
+        data=Bench2DexDataConfig(
+            repo_id="/mnt/ssd1/szhao/DexTool/bench2dex/task26/replay-generalization",
+            dataset_processor="bench2dex_hdf5",
+            camera_names=("cam_overhead", "cam_wrist_left", "cam_wrist_right"),
+        ),
+        batch_size=64,
+        num_workers=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=20_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(
+            weight_decay=1e-10,
+            clip_gradient_norm=1.0,
+        ),
+        ema_decay=0.99,
+        freeze_filter=nnx.Not(nnx_utils.PathRegex(r".*(llm.*_1|action_in_proj|action_out_proj).*")),
+        weight_loader=weight_loaders.ShapeCompatibleCheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params",
+            allowed_mismatch_regexes=(r".*action_in_proj.*", r".*action_out_proj.*"),
+        ),
+        assets_base_dir="/mnt/ssd1/szhao/DexTool/openpi_assets",
+        checkpoint_base_dir="/mnt/ssd1/szhao/DexTool/openpi_checkpoints",
+        num_train_steps=20_000,
     ),
     #
     # Fine-tuning Aloha configs.
