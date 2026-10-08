@@ -19,6 +19,7 @@ EPISODE_STEPS="${EPISODE_STEPS:-871}"
 BASE_SEED="${BASE_SEED:-100000000}"
 SOURCE_COLLECT_CONFIG="${SOURCE_COLLECT_CONFIG:-${BENCH2DEX_ROOT}/configs/collect/default.yaml}"
 POLICY_COLLECT_CONFIG="${POLICY_COLLECT_CONFIG:-${ISAAC_TMPDIR}/task26_pi05_three_camera.yaml}"
+FILTER_POLICY_CAMERAS="${FILTER_POLICY_CAMERAS:-1}"
 
 export DEX2BENCH_RECORD_RES="${DEX2BENCH_RECORD_RES:-480}"
 export DEX2BENCH_RECORD_JPEG="${DEX2BENCH_RECORD_JPEG:-80}"
@@ -28,12 +29,22 @@ export PYTHONUNBUFFERED=1
 
 mkdir -p "${OUTPUT_ROOT}" "${ISAAC_TMPDIR}"
 export TMPDIR="${ISAAC_TMPDIR}"
-"${ISAAC_PYTHON}" "${REPO_ROOT}/scripts/filter_bench2dex_collect_config.py" \
-    --input "${SOURCE_COLLECT_CONFIG}" \
-    --output "${POLICY_COLLECT_CONFIG}" \
-    --camera cam_overhead \
-    --camera cam_wrist_left \
-    --camera cam_wrist_right
+echo "[eval] ISAAC_PYTHON=${ISAAC_PYTHON}"
+"${ISAAC_PYTHON}" -c 'import sys; print(f"[eval] interpreter={sys.executable}")'
+echo "[eval] FILTER_POLICY_CAMERAS=${FILTER_POLICY_CAMERAS}"
+if [[ "${FILTER_POLICY_CAMERAS}" == "1" ]]; then
+    "${ISAAC_PYTHON}" "${REPO_ROOT}/scripts/filter_bench2dex_collect_config.py" \
+        --input "${SOURCE_COLLECT_CONFIG}" \
+        --output "${POLICY_COLLECT_CONFIG}" \
+        --camera cam_overhead \
+        --camera cam_wrist_left \
+        --camera cam_wrist_right
+elif [[ "${FILTER_POLICY_CAMERAS}" == "0" ]]; then
+    POLICY_COLLECT_CONFIG="${SOURCE_COLLECT_CONFIG}"
+else
+    echo "FILTER_POLICY_CAMERAS must be 0 or 1, got: ${FILTER_POLICY_CAMERAS}" >&2
+    exit 2
+fi
 cd "${BENCH2DEX_ROOT}"
 
 run_channel() {

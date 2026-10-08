@@ -104,6 +104,20 @@ Before launching a chunk, the launcher writes `${ISAAC_TMPDIR}/task26_pi05_three
 [init] Cameras: ['cam_overhead', 'cam_wrist_left', 'cam_wrist_right']
 ```
 
+Set `FILTER_POLICY_CAMERAS=0` only when resuming an evaluation whose earlier chunks used the legacy five-camera renderer. This passes the original Bench2Dex collect config unchanged and prevents mixed rendering settings within one 100-rollout result set.
+
+After all recordings exist, the optional relaxed offline score can be generated without rerunning inference or physics:
+
+```bash
+/mnt/ssd1/szhao/DexTool/bench2dex_isaaclab_env/bin/python \
+  scripts/rescore_bench2dex_task26_without_object_upright.py \
+  --eval-root /mnt/ssd1/szhao/DexTool/results/task26_action_expert_v1_step16000/eval \
+  --output-dir /mnt/ssd1/szhao/DexTool/results/task26_action_expert_v1_step16000/rescore_without_object_upright \
+  --bench2dex-root /mnt/ssd1/szhao/DexTool/Bench2Dex
+```
+
+This produces a separate diagnostic metric and never overwrites official success. It keeps the on-tray, object-static, tray-upright, and 0.5-second dwell requirements, but removes each object's upright requirement. Because recordings are sampled at 20 Hz, the offline dwell window is ten consecutive recorded frames rather than the evaluator's 30 consecutive 60 Hz physics steps.
+
 After all 100 JSONL records exist, export one browser-compatible H.264 overhead video per rollout:
 
 ```bash
