@@ -2,7 +2,10 @@
 
 This document records the reproducible evaluation path for the Task26 action-expert checkpoint. Python must always be run from the explicit virtual environments listed below; do not use system Python or a base Conda environment.
 
-## Evaluation target
+## Evaluation targets
+
+The original absolute-action baseline remains available and its completed
+results are not overwritten:
 
 - Task: Bench2Dex Task26, `26_canned_food_tray_line_arrangement`
 - Robot: `multi_iiwa7_with_sharpa`
@@ -17,6 +20,63 @@ This document records the reproducible evaluation path for the Task26 action-exp
 - Evaluation horizon: 871 policy steps = 2613 physics steps at policy stride 3
 - Rendered policy cameras: `cam_overhead`, `cam_wrist_left`, and `cam_wrist_right` only
 - Policy-server warm-up: one synthetic inference before the RPC port starts listening
+
+The aligned-delta evaluation uses the same protocol with these substitutions:
+
+- Pipeline mode: `aligned_delta`
+- Config: `pi05_bench2dex_task26_action_expert_aligned_delta`
+- Checkpoint: `/mnt/ssd1/szhao/DexTool/ckp/pi05_bench2dex_task26_action_expert_aligned_delta/task26_aligned_delta_1009002600/19999`
+- Result root: `/mnt/ssd1/szhao/DexTool/results/task26_aligned_delta_1009002600_step19999`
+
+## Action-representation pipelines
+
+`PIPELINE_MODE` selects matching preprocessing, OpenPI output semantics, and
+Bench2Dex execution semantics. The default remains `absolute` for backward
+compatibility.
+
+| `PIPELINE_MODE` | Model label/output | Executor conversion |
+| --- | --- | --- |
+| `absolute` | `a[t+k]` | execute directly |
+| `state_delta` | `a[t+k] - s[t]` | add the qpos captured when the chunk was requested to every queued delta |
+| `aligned_delta` | `a[t+k] - s[t+k]` | when queued delta `k` executes, add the live qpos at that timestep |
+
+All modes keep `action_horizon=50`. For `aligned_delta`, the server returns a
+50-step delta chunk; it does not cumulatively convert that chunk from the
+initial state. Bench2Dex consumes one delta at each 20 Hz policy timestep and
+forms the absolute command using the current measured qpos:
+
+```text
+absolute_target[t + k] = live_qpos[t + k] + predicted_delta[t + k]
+```
+
+This preserves closed-loop tracking within an open-loop action chunk and does
+not accumulate earlier actuator tracking errors. The original absolute mode
+still sends its output directly, so the completed baseline pipeline is
+unchanged.
+
+Before Isaac Sim starts, the launcher queries the policy server's `describe`
+RPC and requires exact agreement on config, checkpoint, action representation,
+action horizon, and action dimension. This prevents accidentally connecting an
+aligned-delta executor to an absolute checkpoint or vice versa.
+
+Ground-truth validation uses a real Task26 replay HDF5 trajectory and applies
+the same executor conversion to ten different 50-step, 58-dimensional chunks:
+
+```bash
+OPENPI_DATA_HOME=/mnt/ssd1/szhao/DexTool/openpi_assets/openpi-cache \
+/mnt/ssd1/szhao/DexTool/openpi_env/bin/python \
+  scripts/verify_bench2dex_action_representations.py \
+  --episode /mnt/ssd1/szhao/DexTool/bench2dex/task26/replay-generalization/episode_000035_1.hdf5 \
+  --samples 10
+```
+
+Verified maximum absolute reconstruction errors:
+
+| Representation | Maximum error |
+| --- | ---: |
+| `absolute` | `0.0` |
+| `state_delta` | `5.96e-08` |
+| `aligned_delta` | `5.96e-08` |
 
 The VLM pipeline remains frozen. The action expert is finetuned, while its action input/output projections are initialized and trained from scratch for 58-dimensional state/action data.
 
@@ -73,7 +133,7 @@ Evaluation is split into five-episode Isaac Sim processes to bound simulator mem
 
 ## Reproduction
 
-Start the policy server in a persistent session:
+Start the original absolute policy server in a persistent session:
 
 ```bash
 tmux new-session -d -s bench2dex_task26_policy \
@@ -89,11 +149,49 @@ tmux new-session -d -s bench2dex_task26_policy \
      --port 9000"
 ```
 
-Run or resume the evaluator:
+For the aligned-delta checkpoint, use a separate session and select its config:
+
+```bash
+tmux new-session -d -s bench2dex_task26_aligned_policy \
+  "cd /home/shuqi/DexCondVLA && \
+   export CUDA_VISIBLE_DEVICES=0 \
+   XLA_PYTHON_CLIENT_MEM_FRACTION=0.40 \
+   OPENPI_DATA_HOME=/mnt/ssd1/szhao/DexTool/openpi_assets/openpi-cache && \
+   exec /mnt/ssd1/szhao/DexTool/openpi_env/bin/python -u \
+     scripts/serve_bench2dex_rpc_policy.py \
+     --config pi05_bench2dex_task26_action_expert_aligned_delta \
+     --checkpoint /mnt/ssd1/szhao/DexTool/ckp/pi05_bench2dex_task26_action_expert_aligned_delta/task26_aligned_delta_1009002600/19999 \
+     --warmup-runs 1 \
+     --port 9000"
+```
+
+Run or resume the original absolute evaluator:
 
 ```bash
 cd /home/shuqi/DexCondVLA
-bash scripts/run_bench2dex_task26_evaluation.sh
+PIPELINE_MODE=absolute bash scripts/run_bench2dex_task26_evaluation.sh
+```
+
+Run or resume the aligned-delta evaluator without touching the baseline result
+directory:
+
+```bash
+cd /home/shuqi/DexCondVLA
+PIPELINE_MODE=aligned_delta bash scripts/run_bench2dex_task26_evaluation.sh
+```
+
+The `0.40` XLA fraction was validated on GPU 0 before launching the current
+run: checkpoint restore, one `(50, 58)` synthetic warm-up, and RPC startup all
+completed successfully. With Isaac Sim active, GPU 0 retained roughly 28 GB
+free at startup.
+
+Current persistent sessions and logs:
+
+```text
+policy tmux: bench2dex_task26_aligned_policy
+eval tmux:   bench2dex_task26_aligned_eval
+policy log:  /mnt/ssd1/szhao/DexTool/openpi_logs/bench2dex_task26_aligned_policy_step19999.log
+eval log:    /mnt/ssd1/szhao/DexTool/results/task26_aligned_delta_1009002600_step19999/evaluation_launcher.log
 ```
 
 The launcher explicitly invokes the Isaac virtual environment. IsaacLab's temporary directory is redirected to the SSD result root because a shared `/tmp/isaaclab` directory may not be writable.
@@ -118,6 +216,16 @@ After all recordings exist, the optional relaxed offline score can be generated 
 
 This produces a separate diagnostic metric and never overwrites official success. It keeps the on-tray, object-static, tray-upright, and 0.5-second dwell requirements, but removes each object's upright requirement. Because recordings are sampled at 20 Hz, the offline dwell window is ten consecutive recorded frames rather than the evaluator's 30 consecutive 60 Hz physics steps.
 
+For aligned-delta results, use the same scorer with the isolated result root:
+
+```bash
+/mnt/ssd1/szhao/DexTool/bench2dex_isaaclab_env/bin/python \
+  scripts/rescore_bench2dex_task26_without_object_upright.py \
+  --eval-root /mnt/ssd1/szhao/DexTool/results/task26_aligned_delta_1009002600_step19999/eval \
+  --output-dir /mnt/ssd1/szhao/DexTool/results/task26_aligned_delta_1009002600_step19999/rescore_without_object_upright \
+  --bench2dex-root /mnt/ssd1/szhao/DexTool/Bench2Dex
+```
+
 After all 100 JSONL records exist, export one browser-compatible H.264 overhead video per rollout:
 
 ```bash
@@ -137,6 +245,16 @@ rollout_057_inv_episode_007_success.mp4
 
 The export directory also contains `rollout_manifest.csv`, `rollout_manifest.json`, and `success_summary.json`.
 
+The aligned-delta export command is:
+
+```bash
+/mnt/ssd1/szhao/DexTool/openpi_env/bin/python \
+  scripts/export_bench2dex_task26_rollouts.py \
+  --eval-root /mnt/ssd1/szhao/DexTool/results/task26_aligned_delta_1009002600_step19999/eval \
+  --output-dir /mnt/ssd1/szhao/DexTool/results/task26_aligned_delta_1009002600_step19999/rollouts \
+  --bench2dex-root /mnt/ssd1/szhao/DexTool/Bench2Dex
+```
+
 ## Smoke-test evidence
 
 - Valid full-length smoke result: `smoke_full58_explicit/output/per_episode.jsonl`
@@ -150,10 +268,22 @@ Two earlier smoke directories contain configuration-abort records and must not b
 - `smoke/`: IsaacLab temporary log directory was not writable
 - `smoke_full58/`: the evaluator defaulted to active 54-DOF mode because `--no-active-dof` was not yet explicit
 
-## Final results
+## Final results: absolute-action baseline
 
 <!-- RESULTS_START -->
-<!-- RESULTS_PLACEHOLDER: replaced after all 100 official rollouts and video exports finish. -->
+- Completed at: `2026-10-07T22:37:17-07:00`
+- Episodes: **100**
+- Successes: **0**
+- Overall success rate: **0.0%**
+- Validated H.264 overhead videos: **100**
+- Video directory: `/mnt/ssd1/szhao/DexTool/results/task26_action_expert_v1_step16000/rollouts`
+
+| Channel | Episodes | Successes | Success rate |
+| --- | ---: | ---: | ---: |
+| `none` | 25 | 0 | 0.0% |
+| `cov` | 25 | 0 | 0.0% |
+| `inv` | 25 | 0 | 0.0% |
+| `inv_cov` | 25 | 0 | 0.0% |
 <!-- RESULTS_END -->
 
 ## Version caveat

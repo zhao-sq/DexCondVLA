@@ -368,6 +368,11 @@ class Bench2DexDataConfig(DataConfigFactory):
     """Configuration for reading Bench2Dex replay HDF5 files in-place."""
 
     default_prompt: str | None = None
+    # Mutually exclusive representation of the model's 58D action labels:
+    # - absolute: a[t+k]
+    # - state_delta: a[t+k] - s[t]
+    # - aligned_delta: a[t+k] - s[t+k]
+    action_representation: Literal["absolute", "state_delta", "aligned_delta"] = "absolute"
     dataset_processor: str = "bench2dex_hdf5"
     camera_names: tuple[str, str, str] = ("cam_overhead", "cam_wrist_left", "cam_wrist_right")
     assets: AssetsConfig = dataclasses.field(default_factory=lambda: AssetsConfig(asset_id="bench2dex_task26"))
@@ -380,6 +385,20 @@ class Bench2DexDataConfig(DataConfigFactory):
             inputs=[bench2dex_policy.Bench2DexInputs(action_dim=model_config.action_dim)],
             outputs=[bench2dex_policy.Bench2DexOutputs(action_dim=model_config.action_dim)],
         )
+        action_mask = _transforms.make_bool_mask(model_config.action_dim)
+        match self.action_representation:
+            case "absolute":
+                pass
+            case "state_delta":
+                data_transforms = data_transforms.push(
+                    inputs=[_transforms.DeltaActions(action_mask)],
+                )
+            case "aligned_delta":
+                data_transforms = data_transforms.push(
+                    inputs=[_transforms.AlignedDeltaActions(action_mask)],
+                )
+            case _:
+                raise ValueError(f"Unknown Bench2Dex action representation: {self.action_representation!r}")
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
@@ -390,6 +409,7 @@ class Bench2DexDataConfig(DataConfigFactory):
             dataset_processor_options={
                 "camera_names": self.camera_names,
                 "prompt": self.default_prompt,
+                "include_action_states": self.action_representation == "aligned_delta",
             },
         )
 
@@ -816,6 +836,130 @@ _CONFIGS = [
             repo_id="/mnt/ssd1/szhao/DexTool/bench2dex/task26/replay-generalization",
             dataset_processor="bench2dex_hdf5",
             camera_names=("cam_overhead", "cam_wrist_left", "cam_wrist_right"),
+        ),
+        batch_size=64,
+        num_workers=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=20_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(
+            weight_decay=1e-10,
+            clip_gradient_norm=1.0,
+        ),
+        ema_decay=0.99,
+        freeze_filter=nnx.Not(nnx_utils.PathRegex(r".*(llm.*_1|action_in_proj|action_out_proj).*")),
+        weight_loader=weight_loaders.ShapeCompatibleCheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params",
+            allowed_mismatch_regexes=(r".*action_in_proj.*", r".*action_out_proj.*"),
+        ),
+        assets_base_dir="/mnt/ssd1/szhao/DexTool/openpi_assets",
+        checkpoint_base_dir="/mnt/ssd1/szhao/DexTool/openpi_checkpoints",
+        num_train_steps=20_000,
+    ),
+    # A fresh 25k-step replication of the original absolute-action Task26
+    # recipe. It deliberately reuses the original absolute-action norm stats
+    # while writing checkpoints to an isolated config directory.
+    TrainConfig(
+        name="pi05_bench2dex_task26_action_expert_25k",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=58,
+            action_horizon=50,
+            max_token_len=280,
+        ),
+        data=Bench2DexDataConfig(
+            repo_id="/mnt/ssd1/szhao/DexTool/bench2dex/task26/replay-generalization",
+            dataset_processor="bench2dex_hdf5",
+            camera_names=("cam_overhead", "cam_wrist_left", "cam_wrist_right"),
+            assets=AssetsConfig(
+                assets_dir="/mnt/ssd1/szhao/DexTool/openpi_assets/pi05_bench2dex_task26_action_expert",
+                asset_id="bench2dex_task26",
+            ),
+        ),
+        batch_size=64,
+        num_workers=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=25_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(
+            weight_decay=1e-10,
+            clip_gradient_norm=1.0,
+        ),
+        ema_decay=0.99,
+        freeze_filter=nnx.Not(nnx_utils.PathRegex(r".*(llm.*_1|action_in_proj|action_out_proj).*")),
+        weight_loader=weight_loaders.ShapeCompatibleCheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params",
+            allowed_mismatch_regexes=(r".*action_in_proj.*", r".*action_out_proj.*"),
+        ),
+        assets_base_dir="/mnt/ssd1/szhao/DexTool/openpi_assets",
+        checkpoint_base_dir="/mnt/ssd1/szhao/DexTool/ckp",
+        num_train_steps=25_000,
+    ),
+    # Delta-action variant of the Task26 recipe. This keeps the original
+    # absolute-action config unchanged so existing checkpoints retain their
+    # original inference semantics.
+    TrainConfig(
+        name="pi05_bench2dex_task26_action_expert_state_delta",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=58,
+            action_horizon=50,
+            max_token_len=280,
+        ),
+        data=Bench2DexDataConfig(
+            repo_id="/mnt/ssd1/szhao/DexTool/bench2dex/task26/replay-generalization",
+            dataset_processor="bench2dex_hdf5",
+            camera_names=("cam_overhead", "cam_wrist_left", "cam_wrist_right"),
+            action_representation="state_delta",
+            # Each label representation needs its own normalization statistics.
+            assets=AssetsConfig(asset_id="bench2dex_task26_state_delta"),
+        ),
+        batch_size=64,
+        num_workers=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=20_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(
+            weight_decay=1e-10,
+            clip_gradient_norm=1.0,
+        ),
+        ema_decay=0.99,
+        freeze_filter=nnx.Not(nnx_utils.PathRegex(r".*(llm.*_1|action_in_proj|action_out_proj).*")),
+        weight_loader=weight_loaders.ShapeCompatibleCheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params",
+            allowed_mismatch_regexes=(r".*action_in_proj.*", r".*action_out_proj.*"),
+        ),
+        assets_base_dir="/mnt/ssd1/szhao/DexTool/openpi_assets",
+        checkpoint_base_dir="/mnt/ssd1/szhao/DexTool/openpi_checkpoints",
+        num_train_steps=20_000,
+    ),
+    # Time-aligned delta variant: every action target is relative to the
+    # observed state at that same dataset timestep. Inference leaves the
+    # unnormalized chunk in delta space; the evaluator adds each delta to the
+    # live robot state at that action's execution timestep.
+    TrainConfig(
+        name="pi05_bench2dex_task26_action_expert_aligned_delta",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=58,
+            action_horizon=50,
+            max_token_len=280,
+        ),
+        data=Bench2DexDataConfig(
+            repo_id="/mnt/ssd1/szhao/DexTool/bench2dex/task26/replay-generalization",
+            dataset_processor="bench2dex_hdf5",
+            camera_names=("cam_overhead", "cam_wrist_left", "cam_wrist_right"),
+            action_representation="aligned_delta",
+            assets=AssetsConfig(asset_id="bench2dex_task26_aligned_delta"),
         ),
         batch_size=64,
         num_workers=4,

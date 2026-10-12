@@ -12,6 +12,27 @@ The registered OpenPI config is:
 pi05_bench2dex_task26_action_expert
 ```
 
+The two optional delta-action variants are:
+
+```text
+pi05_bench2dex_task26_action_expert_state_delta
+pi05_bench2dex_task26_action_expert_aligned_delta
+```
+
+Select the representation with `Bench2DexDataConfig.action_representation`:
+
+| Value | Training label at chunk offset `k` | Inference reconstruction |
+|---|---|---|
+| `absolute` | `a[t+k]` | unchanged |
+| `state_delta` | `a[t+k] - s[t]` | add the chunk-start `s[t]` to every delta |
+| `aligned_delta` | `a[t+k] - s[t+k]` | add live `s[t+k]` when each queued delta executes |
+
+All three modes retain `action_horizon=50`. Delta configs return unnormalized
+deltas from the OpenPI server; the Bench2Dex executor applies the matching
+state reference while consuming the queue. Each representation has separate
+action normalization statistics. The original absolute config remains
+unchanged so existing checkpoints retain their original semantics.
+
 It is defined in `src/openpi/training/config.py` and contains both the dataset
 selection and the fine-tuning recipe.
 
@@ -94,6 +115,43 @@ not need another hard-coded dataset branch.
 | `right_wrist_0_rgb` | `/cameras/cam_wrist_right/rgb` |
 | prompt | `/meta/instruction` |
 
+With `state_delta`, the raw dataset remains unchanged. After `Bench2DexInputs`
+maps the sample, the data transform replaces every future absolute target in
+the action chunk with:
+
+```text
+delta_action[t + k] = commanded_action[t + k] - qpos[t]
+```
+
+The same current state `qpos[t]` is subtracted from all 50 targets in that
+sample's action chunk. All 58 arm and hand joint dimensions use this rule.
+Normalization statistics are computed after this conversion. At inference,
+the reverse output transform runs after delta-action unnormalization:
+
+```text
+absolute_target[t + k] = predicted_delta[t + k] + current_qpos[t]
+```
+
+The robot therefore continues to receive absolute 58D joint targets.
+
+With `aligned_delta`, the loader also reads the qpos chunk aligned with the
+commanded-action chunk. This helper is consumed by preprocessing and is not a
+model input. Every training label is:
+
+```text
+delta_action[t + k] = commanded_action[t + k] - qpos[t + k]
+```
+
+At inference, the model still predicts a full 50-step chunk. The evaluator
+converts each queued delta only when that action is executed:
+
+```text
+absolute_target[t + k] = live_qpos[t + k] + predicted_delta[t + k]
+```
+
+This applies to all 58 dimensions and leaves the action horizon at 50. It does
+not cumulatively add tracking errors from earlier actions in the chunk.
+
 The processor rejects the return-to-home tail using
 `meta/homing_start_sim_step`, rejects invalid frames, validates the 58D joint
 ordering, and decodes JPEGs lazily. It does not filter on the released
@@ -170,6 +228,22 @@ Expected output directory:
   pi05_bench2dex_task26_action_expert/bench2dex_task26
 ```
 
+For either delta-action mode, compute its own statistics:
+
+```bash
+OPENPI_DATA_HOME=/mnt/ssd1/szhao/DexTool/openpi_assets/openpi-cache \
+/mnt/ssd1/szhao/DexTool/openpi_env/bin/python \
+  scripts/compute_norm_stats.py \
+  --config-name pi05_bench2dex_task26_action_expert_state_delta
+
+OPENPI_DATA_HOME=/mnt/ssd1/szhao/DexTool/openpi_assets/openpi-cache \
+/mnt/ssd1/szhao/DexTool/openpi_env/bin/python \
+  scripts/compute_norm_stats.py \
+  --config-name pi05_bench2dex_task26_action_expert_aligned_delta
+```
+
+Do not share normalization statistics between the three representations.
+
 ### 5.3 Training
 
 Do not run this until the base-checkpoint download has been explicitly
@@ -188,6 +262,22 @@ WANDB_DIR=/mnt/ssd1/szhao/DexTool/openpi_logs/wandb \
   --exp-name=task26_action_expert_v1 \
   --overwrite \
   2>&1 | tee /mnt/ssd1/szhao/DexTool/openpi_logs/task26_action_expert_v1.log
+```
+
+To switch representations, replace the config and experiment name:
+
+```text
+absolute:
+  config:   pi05_bench2dex_task26_action_expert
+  exp-name: task26_action_expert_v1
+
+chunk-start state delta, a[t+k] - s[t]:
+  config:   pi05_bench2dex_task26_action_expert_state_delta
+  exp-name: task26_action_expert_state_delta_v1
+
+time-aligned dynamics delta, a[t+k] - s[t+k]:
+  config:   pi05_bench2dex_task26_action_expert_aligned_delta
+  exp-name: task26_action_expert_aligned_delta_v1
 ```
 
 On the currently observed RTX PRO 6000 Blackwell 96GB, use memory fraction

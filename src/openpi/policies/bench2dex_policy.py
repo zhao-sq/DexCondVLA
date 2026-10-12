@@ -46,6 +46,14 @@ class Bench2DexInputs(transforms.DataTransformFn):
             if actions.shape[-1] != self.action_dim:
                 raise ValueError(f"Expected {self.action_dim}D actions, got {actions.shape}")
             output["actions"] = actions
+        if "action_states" in data:
+            action_states = np.asarray(data["action_states"], dtype=np.float32)
+            if "actions" not in output or action_states.shape != output["actions"].shape:
+                raise ValueError(
+                    f"Expected action_states to match actions, got {action_states.shape} and "
+                    f"{None if 'actions' not in output else output['actions'].shape}"
+                )
+            output["action_states"] = action_states
         if "prompt" in data:
             output["prompt"] = data["prompt"]
         return output

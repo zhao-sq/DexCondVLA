@@ -62,3 +62,16 @@ def test_bench2dex_processor_owns_source_adaptation(tmp_path):
 
     assert isinstance(dataset, bench2dex_dataset.Bench2DexHdf5Dataset)
     assert len(dataset) == 4
+
+
+def test_bench2dex_aligned_action_states(tmp_path):
+    episode = tmp_path / "episode_000000.hdf5"
+    _write_episode(episode)
+    dataset = bench2dex_dataset.Bench2DexHdf5Dataset([str(episode)], action_horizon=3, include_action_states=True)
+
+    raw = dataset[0]
+    assert raw["action_states"].shape == (3, 58)
+    np.testing.assert_array_equal(raw["action_states"][0], raw["state"])
+
+    processed = bench2dex_policy.Bench2DexInputs()(raw)
+    assert processed["action_states"].shape == processed["actions"].shape

@@ -107,6 +107,7 @@ class Bench2DexDatasetProcessor:
     source: str
     camera_names: Sequence[str] = DEFAULT_CAMERA_NAMES
     prompt: str | None = None
+    include_action_states: bool = False
 
     def create_dataset(self, *, action_horizon: int, action_dim: int) -> Bench2DexHdf5Dataset:
         # Keep compatibility with the earlier bench2dex:/path spelling while
@@ -121,6 +122,7 @@ class Bench2DexDatasetProcessor:
             action_dim=action_dim,
             camera_names=self.camera_names,
             prompt=self.prompt,
+            include_action_states=self.include_action_states,
         )
 
 
@@ -135,6 +137,7 @@ class Bench2DexHdf5Dataset(torch.utils.data.Dataset):
         action_dim: int = 58,
         camera_names: Sequence[str] = DEFAULT_CAMERA_NAMES,
         prompt: str | None = None,
+        include_action_states: bool = False,
     ) -> None:
         if not hdf5_paths:
             raise ValueError("hdf5_paths is empty")
@@ -144,6 +147,7 @@ class Bench2DexHdf5Dataset(torch.utils.data.Dataset):
         self.action_horizon = int(action_horizon)
         self.action_dim = int(action_dim)
         self.camera_names = tuple(camera_names)
+        self.include_action_states = bool(include_action_states)
         if self.camera_names != DEFAULT_CAMERA_NAMES:
             raise ValueError(f"Expected camera_names={DEFAULT_CAMERA_NAMES}, got {self.camera_names}")
 
@@ -211,13 +215,21 @@ class Bench2DexHdf5Dataset(torch.utils.data.Dataset):
         with h5py.File(episode.path, "r") as h5file:
             state = np.asarray(h5file["robot/qpos"][frame_index], dtype=np.float32)
             actions = np.asarray(h5file["action/commanded"][frame_indices], dtype=np.float32)
+            action_states = (
+                np.asarray(h5file["robot/qpos"][frame_indices], dtype=np.float32)
+                if self.include_action_states
+                else None
+            )
             images = {
                 camera: _decode_jpeg(h5file[f"cameras/{camera}/rgb"][frame_index]) for camera in self.camera_names
             }
 
-        return {
+        sample = {
             "state": state,
             "images": images,
             "actions": actions,
             "prompt": episode.prompt,
         }
+        if action_states is not None:
+            sample["action_states"] = action_states
+        return sample

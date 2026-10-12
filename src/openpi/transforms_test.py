@@ -62,6 +62,77 @@ def test_absolute_actions_noop():
     assert transform(item) is item
 
 
+def test_aligned_delta_actions():
+    state = np.array([1.0, 2.0, 3.0])
+    action_states = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [2.0, 4.0, 7.0],
+            [8.0, 10.0, 8.0],
+        ]
+    )
+    absolute = np.array(
+        [
+            [3.0, 5.0, 4.0],
+            [4.0, 9.0, 8.0],
+            [10.0, 11.0, 9.0],
+        ]
+    )
+    item = {"state": state.copy(), "action_states": action_states, "actions": absolute.copy()}
+
+    item = _transforms.AlignedDeltaActions(mask=[True, True, True])(item)
+    np.testing.assert_allclose(
+        item["actions"],
+        np.array(
+            [
+                [2.0, 3.0, 1.0],
+                [2.0, 5.0, 1.0],
+                [2.0, 1.0, 1.0],
+            ]
+        ),
+    )
+
+    assert "action_states" not in item
+
+
+def test_aligned_delta_actions_partial_mask_and_batch():
+    state = np.array([[1.0, 2.0], [10.0, 20.0]])
+    action_states = np.array(
+        [
+            [[1.0, 2.0], [2.0, 4.0]],
+            [[10.0, 20.0], [13.0, 27.0]],
+        ]
+    )
+    absolute = np.array(
+        [
+            [[3.0, 5.0], [4.0, 9.0]],
+            [[13.0, 25.0], [16.0, 29.0]],
+        ]
+    )
+    item = {"state": state.copy(), "action_states": action_states, "actions": absolute.copy()}
+
+    item = _transforms.AlignedDeltaActions(mask=[True, False])(item)
+    np.testing.assert_allclose(item["actions"], [[[2.0, 5.0], [2.0, 9.0]], [[3.0, 25.0], [3.0, 29.0]]])
+
+
+def test_aligned_delta_actions_noop_and_missing_states():
+    item = {
+        "state": np.array([1.0, 2.0]),
+        "action_states": np.array([[1.0, 2.0]]),
+        "actions": np.array([[3.0, 4.0]]),
+    }
+
+    assert _transforms.AlignedDeltaActions(mask=None)(item) is item
+    # No-op when there are no actions in the input.
+    del item["actions"]
+    assert _transforms.AlignedDeltaActions(mask=[True, False])(item) is item
+
+    with pytest.raises(KeyError, match="action_states"):
+        _transforms.AlignedDeltaActions(mask=[True, True])(
+            {"state": np.array([1.0, 2.0]), "actions": np.array([[3.0, 4.0]])}
+        )
+
+
 def test_make_bool_mask():
     assert _transforms.make_bool_mask(2, -2, 2) == (True, True, False, False, True, True)
     assert _transforms.make_bool_mask(2, 0, 2) == (True, True, True, True)

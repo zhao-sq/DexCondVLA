@@ -10,8 +10,37 @@ BENCH2DEX_ROOT="${BENCH2DEX_ROOT:-/mnt/ssd1/szhao/DexTool/Bench2Dex}"
 ISAAC_PYTHON="${ISAAC_PYTHON:-/mnt/ssd1/szhao/DexTool/bench2dex_isaaclab_env/bin/python}"
 REPO_ROOT="${REPO_ROOT:-/home/shuqi/DexCondVLA}"
 ANCHOR_DIR="${ANCHOR_DIR:-/mnt/ssd1/szhao/DexTool/bench2dex/task26/replay-generalization}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/mnt/ssd1/szhao/DexTool/results/task26_action_expert_v1_step16000/eval}"
-ISAAC_TMPDIR="${ISAAC_TMPDIR:-/mnt/ssd1/szhao/DexTool/results/task26_action_expert_v1_step16000/isaac_tmp}"
+PIPELINE_MODE="${PIPELINE_MODE:-absolute}"
+case "${PIPELINE_MODE}" in
+    absolute)
+        DEFAULT_POLICY_CONFIG="pi05_bench2dex_task26_action_expert"
+        DEFAULT_POLICY_CHECKPOINT="/mnt/ssd1/szhao/DexTool/openpi_checkpoints/pi05_bench2dex_task26_action_expert/task26_action_expert_v1/16000"
+        DEFAULT_POLICY_NAME="pi05_task26_action_expert_step16000"
+        DEFAULT_RESULT_ROOT="/mnt/ssd1/szhao/DexTool/results/task26_action_expert_v1_step16000"
+        ;;
+    state_delta)
+        DEFAULT_POLICY_CONFIG="pi05_bench2dex_task26_action_expert_state_delta"
+        DEFAULT_POLICY_CHECKPOINT=""
+        DEFAULT_POLICY_NAME="pi05_task26_state_delta"
+        DEFAULT_RESULT_ROOT="/mnt/ssd1/szhao/DexTool/results/task26_state_delta"
+        ;;
+    aligned_delta)
+        DEFAULT_POLICY_CONFIG="pi05_bench2dex_task26_action_expert_aligned_delta"
+        DEFAULT_POLICY_CHECKPOINT="/mnt/ssd1/szhao/DexTool/ckp/pi05_bench2dex_task26_action_expert_aligned_delta/task26_aligned_delta_1009002600/19999"
+        DEFAULT_POLICY_NAME="pi05_task26_aligned_delta_step19999"
+        DEFAULT_RESULT_ROOT="/mnt/ssd1/szhao/DexTool/results/task26_aligned_delta_1009002600_step19999"
+        ;;
+    *)
+        echo "PIPELINE_MODE must be absolute, state_delta, or aligned_delta; got: ${PIPELINE_MODE}" >&2
+        exit 2
+        ;;
+esac
+POLICY_CONFIG="${POLICY_CONFIG:-${DEFAULT_POLICY_CONFIG}}"
+POLICY_CHECKPOINT="${POLICY_CHECKPOINT:-${DEFAULT_POLICY_CHECKPOINT}}"
+POLICY_NAME="${POLICY_NAME:-${DEFAULT_POLICY_NAME}}"
+RESULT_ROOT="${RESULT_ROOT:-${DEFAULT_RESULT_ROOT}}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${RESULT_ROOT}/eval}"
+ISAAC_TMPDIR="${ISAAC_TMPDIR:-${RESULT_ROOT}/isaac_tmp}"
 REMOTE_PORT="${REMOTE_PORT:-9000}"
 EPISODES_PER_CHANNEL="${EPISODES_PER_CHANNEL:-25}"
 EPISODES_PER_PROCESS="${EPISODES_PER_PROCESS:-5}"
@@ -20,6 +49,15 @@ BASE_SEED="${BASE_SEED:-100000000}"
 SOURCE_COLLECT_CONFIG="${SOURCE_COLLECT_CONFIG:-${BENCH2DEX_ROOT}/configs/collect/default.yaml}"
 POLICY_COLLECT_CONFIG="${POLICY_COLLECT_CONFIG:-${ISAAC_TMPDIR}/task26_pi05_three_camera.yaml}"
 FILTER_POLICY_CAMERAS="${FILTER_POLICY_CAMERAS:-1}"
+
+if [[ -z "${POLICY_CHECKPOINT}" ]]; then
+    echo "POLICY_CHECKPOINT is required for PIPELINE_MODE=${PIPELINE_MODE}" >&2
+    exit 2
+fi
+if [[ ! -d "${POLICY_CHECKPOINT}" ]]; then
+    echo "Policy checkpoint does not exist: ${POLICY_CHECKPOINT}" >&2
+    exit 2
+fi
 
 export DEX2BENCH_RECORD_RES="${DEX2BENCH_RECORD_RES:-480}"
 export DEX2BENCH_RECORD_JPEG="${DEX2BENCH_RECORD_JPEG:-80}"
@@ -31,6 +69,10 @@ mkdir -p "${OUTPUT_ROOT}" "${ISAAC_TMPDIR}"
 export TMPDIR="${ISAAC_TMPDIR}"
 echo "[eval] ISAAC_PYTHON=${ISAAC_PYTHON}"
 "${ISAAC_PYTHON}" -c 'import sys; print(f"[eval] interpreter={sys.executable}")'
+echo "[eval] PIPELINE_MODE=${PIPELINE_MODE}"
+echo "[eval] POLICY_CONFIG=${POLICY_CONFIG}"
+echo "[eval] POLICY_CHECKPOINT=${POLICY_CHECKPOINT}"
+echo "[eval] RESULT_ROOT=${RESULT_ROOT}"
 echo "[eval] FILTER_POLICY_CAMERAS=${FILTER_POLICY_CAMERAS}"
 if [[ "${FILTER_POLICY_CAMERAS}" == "1" ]]; then
     "${ISAAC_PYTHON}" "${REPO_ROOT}/scripts/filter_bench2dex_collect_config.py" \
@@ -45,6 +87,14 @@ else
     echo "FILTER_POLICY_CAMERAS must be 0 or 1, got: ${FILTER_POLICY_CAMERAS}" >&2
     exit 2
 fi
+"${ISAAC_PYTHON}" "${REPO_ROOT}/scripts/check_bench2dex_rpc_policy.py" \
+    --host 127.0.0.1 \
+    --port "${REMOTE_PORT}" \
+    --config "${POLICY_CONFIG}" \
+    --checkpoint "${POLICY_CHECKPOINT}" \
+    --action-representation "${PIPELINE_MODE}" \
+    --action-horizon 50 \
+    --action-dim 58
 cd "${BENCH2DEX_ROOT}"
 
 run_channel() {
@@ -76,7 +126,7 @@ run_channel() {
             run_policy.py
             --task scenes/26_canned_food_tray_line_arrangement.yaml
             --policy-type REMOTE
-            --policy-name pi05_task26_action_expert_step16000
+            --policy-name "${POLICY_NAME}"
             --robot-key multi_iiwa7_with_sharpa
             --collect-config "${POLICY_COLLECT_CONFIG}"
             --no-active-dof
@@ -93,6 +143,7 @@ run_channel() {
             --record-all
             --remote-host 127.0.0.1
             --remote-port "${REMOTE_PORT}"
+            --remote-action-representation "${PIPELINE_MODE}"
             --headless
         )
         if [[ "${profile}" != "inv_cov" ]]; then

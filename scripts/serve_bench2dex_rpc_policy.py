@@ -12,6 +12,7 @@ import base64
 import contextlib
 import json
 import logging
+import pathlib
 import signal
 import socket
 import threading
@@ -28,6 +29,17 @@ from openpi.training import config as training_config
 DEFAULT_WARMUP_PROMPT = (
     "Use left hand to place the master chef can and MSG onto the tray, use right hand to place "
     "the milk box and potted meat can onto the tray."
+)
+
+# Task26's runtime joint order interleaves the two KUKA arms before the hand
+# joints.  The pi0.5 ALOHA embodiment is [left arm 6, left gripper, right arm 6,
+# right gripper].  For a conservative zero-shot probe, map only those 12 arm
+# channels and hold both KUKA joint 7 axes plus all 44 hand joints in place.
+TASK26_ALOHA_LEFT_ARM_INDICES = np.asarray((0, 1, 3, 5, 7, 9), dtype=np.int64)
+TASK26_ALOHA_RIGHT_ARM_INDICES = np.asarray((2, 4, 6, 8, 10, 12), dtype=np.int64)
+TASK26_ALOHA_ACTION_INDICES = np.asarray((*range(6), *range(7, 13)), dtype=np.int64)
+TASK26_ALOHA_FULL_INDICES = np.concatenate(
+    (TASK26_ALOHA_LEFT_ARM_INDICES, TASK26_ALOHA_RIGHT_ARM_INDICES)
 )
 
 
@@ -80,7 +92,22 @@ def _send_message(sock: socket.socket, payload: Any) -> None:
     sock.sendall(encoded)
 
 
-def _extract_policy_observation(raw: dict[str, Any], instruction: str | None) -> dict[str, Any]:
+def _extract_full_state(raw: dict[str, Any]) -> np.ndarray:
+    observation = raw.get("observation", raw)
+
+    joint_action = raw.get("joint_action", {})
+    state_value = joint_action.get("vector", joint_action.get("qpos"))
+    if state_value is None:
+        raise KeyError("Bench2Dex observation is missing joint_action.vector/qpos")
+    state = np.asarray(state_value, dtype=np.float32).reshape(-1)
+    if state.shape != (58,):
+        raise ValueError(f"Expected a 58D Task26 state, got {state.shape}")
+    return state
+
+
+def _extract_policy_observation(
+    raw: dict[str, Any], instruction: str | None, *, task26_aloha_arm_only: bool = False
+) -> dict[str, Any]:
     observation = raw.get("observation", raw)
 
     def camera(name: str) -> np.ndarray:
@@ -92,15 +119,23 @@ def _extract_policy_observation(raw: dict[str, Any], instruction: str | None) ->
             raise ValueError(f"Expected uint8 HWC RGB for {name}, got {image.shape} {image.dtype}")
         return image
 
-    joint_action = raw.get("joint_action", {})
-    state_value = joint_action.get("vector", joint_action.get("qpos"))
-    if state_value is None:
-        raise KeyError("Bench2Dex observation is missing joint_action.vector/qpos")
-    state = np.asarray(state_value, dtype=np.float32).reshape(-1)
-    if state.shape != (58,):
-        raise ValueError(f"Expected a 58D Task26 state, got {state.shape}")
-
+    state = _extract_full_state(raw)
     prompt = instruction or raw.get("language") or ""
+    if task26_aloha_arm_only:
+        aloha_state = np.empty(14, dtype=np.float32)
+        aloha_state[:6] = state[TASK26_ALOHA_LEFT_ARM_INDICES]
+        aloha_state[6] = 1.0  # Virtual ALOHA gripper is open; its output is discarded.
+        aloha_state[7:13] = state[TASK26_ALOHA_RIGHT_ARM_INDICES]
+        aloha_state[13] = 1.0
+        return {
+            "images": {
+                "cam_high": np.moveaxis(camera("cam_overhead"), -1, 0),
+                "cam_left_wrist": np.moveaxis(camera("cam_wrist_left"), -1, 0),
+                "cam_right_wrist": np.moveaxis(camera("cam_wrist_right"), -1, 0),
+            },
+            "state": aloha_state,
+            "prompt": prompt,
+        }
     return {
         "images": {
             "cam_overhead": camera("cam_overhead"),
@@ -112,6 +147,15 @@ def _extract_policy_observation(raw: dict[str, Any], instruction: str | None) ->
     }
 
 
+def _expand_task26_aloha_arm_actions(actions: np.ndarray, full_state: np.ndarray) -> np.ndarray:
+    actions = np.asarray(actions, dtype=np.float32)
+    if actions.ndim != 2 or actions.shape[1] != 14:
+        raise ValueError(f"Expected ALOHA policy actions shaped [T, 14], got {actions.shape}")
+    full_actions = np.broadcast_to(full_state, (actions.shape[0], 58)).copy()
+    full_actions[:, TASK26_ALOHA_FULL_INDICES] = actions[:, TASK26_ALOHA_ACTION_INDICES]
+    return full_actions
+
+
 def _warm_up_policy(
     policy: Any,
     *,
@@ -119,19 +163,32 @@ def _warm_up_policy(
     image_height: int,
     image_width: int,
     prompt: str,
+    task26_aloha_arm_only: bool = False,
 ) -> None:
     if runs <= 0:
         logging.info("Policy warm-up disabled")
         return
 
-    observation = {
-        "images": {
-            camera_id: np.zeros((image_height, image_width, 3), dtype=np.uint8)
-            for camera_id in ("cam_overhead", "cam_wrist_left", "cam_wrist_right")
-        },
-        "state": np.zeros(58, dtype=np.float32),
-        "prompt": prompt,
-    }
+    if task26_aloha_arm_only:
+        observation = {
+            "images": {
+                camera_id: np.zeros((3, image_height, image_width), dtype=np.uint8)
+                for camera_id in ("cam_high", "cam_left_wrist", "cam_right_wrist")
+            },
+            "state": np.asarray([0.0] * 6 + [1.0] + [0.0] * 6 + [1.0], dtype=np.float32),
+            "prompt": prompt,
+        }
+        expected_action_dim = 14
+    else:
+        observation = {
+            "images": {
+                camera_id: np.zeros((image_height, image_width, 3), dtype=np.uint8)
+                for camera_id in ("cam_overhead", "cam_wrist_left", "cam_wrist_right")
+            },
+            "state": np.zeros(58, dtype=np.float32),
+            "prompt": prompt,
+        }
+        expected_action_dim = 58
     had_rng = hasattr(policy, "_rng")
     original_rng = getattr(policy, "_rng", None)
     try:
@@ -139,8 +196,10 @@ def _warm_up_policy(
             started = time.perf_counter()
             result = policy.infer(observation)
             actions = np.asarray(result["actions"], dtype=np.float32)
-            if actions.ndim != 2 or actions.shape[1] != 58:
-                raise ValueError(f"Warm-up returned actions shaped {actions.shape}, expected [T, 58]")
+            if actions.ndim != 2 or actions.shape[1] != expected_action_dim:
+                raise ValueError(
+                    f"Warm-up returned actions shaped {actions.shape}, expected [T, {expected_action_dim}]"
+                )
             logging.info(
                 "Policy warm-up %d/%d completed in %.3fs with actions %s",
                 index + 1,
@@ -154,11 +213,21 @@ def _warm_up_policy(
 
 
 class Bench2DexPolicyServer:
-    def __init__(self, policy: Any, host: str, port: int, action_horizon: int) -> None:
+    def __init__(
+        self,
+        policy: Any,
+        host: str,
+        port: int,
+        action_horizon: int,
+        metadata: dict[str, Any],
+        task26_aloha_arm_only: bool = False,
+    ) -> None:
         self._policy = policy
         self._host = host
         self._port = port
         self._action_horizon = action_horizon
+        self._metadata = metadata
+        self._task26_aloha_arm_only = task26_aloha_arm_only
         self._running = True
         self._inference_lock = threading.Lock()
         self._server: socket.socket | None = None
@@ -171,6 +240,8 @@ class Bench2DexPolicyServer:
 
     def _dispatch(self, request: dict[str, Any]) -> Any:
         command = request.get("command")
+        if command == "describe":
+            return self._metadata
         if command == "reset":
             seed = request.get("seed")
             if seed is not None and hasattr(self._policy, "_rng"):
@@ -179,9 +250,16 @@ class Bench2DexPolicyServer:
         if command == "update_after_action":
             return None
         if command == "get_action_chunk":
-            observation = _extract_policy_observation(request.get("observation", {}), request.get("instruction"))
+            raw_observation = request.get("observation", {})
+            observation = _extract_policy_observation(
+                raw_observation,
+                request.get("instruction"),
+                task26_aloha_arm_only=self._task26_aloha_arm_only,
+            )
             with self._inference_lock:
                 actions = np.asarray(self._policy.infer(observation)["actions"], dtype=np.float32)
+            if self._task26_aloha_arm_only:
+                actions = _expand_task26_aloha_arm_actions(actions, _extract_full_state(raw_observation))
             if actions.ndim != 2 or actions.shape[1] != 58:
                 raise ValueError(f"Expected policy actions shaped [T, 58], got {actions.shape}")
             return actions[: self._action_horizon]
@@ -236,9 +314,31 @@ def main() -> None:
     parser.add_argument("--warmup-image-height", type=int, default=480)
     parser.add_argument("--warmup-image-width", type=int, default=640)
     parser.add_argument("--warmup-prompt", default=DEFAULT_WARMUP_PROMPT)
+    parser.add_argument(
+        "--task26-aloha-arm-only",
+        action="store_true",
+        help=(
+            "Use the pi0.5 ALOHA embodiment for a Task26 zero-shot probe: control "
+            "six joints per KUKA arm, discard gripper outputs, and hold all remaining joints."
+        ),
+    )
     args = parser.parse_args()
 
     config = training_config.get_config(args.config)
+    action_representation = getattr(config.data, "action_representation", "absolute")
+    metadata = {
+        "config": config.name,
+        "checkpoint": str(pathlib.Path(args.checkpoint).resolve()),
+        "action_representation": action_representation,
+        "action_horizon": args.action_horizon,
+        "action_dim": config.model.action_dim,
+    }
+    if args.task26_aloha_arm_only:
+        if config.name != "pi05_aloha":
+            raise ValueError("--task26-aloha-arm-only requires --config pi05_aloha")
+        metadata["action_dim"] = 58
+        metadata["embodiment_mapping"] = "task26_aloha_arm_only"
+    logging.info("Policy metadata: %s", metadata)
     policy = policy_config.create_trained_policy(config, args.checkpoint)
     _warm_up_policy(
         policy,
@@ -246,8 +346,16 @@ def main() -> None:
         image_height=args.warmup_image_height,
         image_width=args.warmup_image_width,
         prompt=args.warmup_prompt,
+        task26_aloha_arm_only=args.task26_aloha_arm_only,
     )
-    server = Bench2DexPolicyServer(policy, args.host, args.port, args.action_horizon)
+    server = Bench2DexPolicyServer(
+        policy,
+        args.host,
+        args.port,
+        args.action_horizon,
+        metadata,
+        task26_aloha_arm_only=args.task26_aloha_arm_only,
+    )
     signal.signal(signal.SIGINT, server.stop)
     signal.signal(signal.SIGTERM, server.stop)
     server.serve_forever()

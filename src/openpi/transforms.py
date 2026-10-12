@@ -245,6 +245,38 @@ class AbsoluteActions(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class AlignedDeltaActions(DataTransformFn):
+    """Convert each absolute action to a delta from its time-aligned state.
+
+    Training samples must contain ``action_states`` with the same leading
+    shape as ``actions`` so that every label is exactly ``a[t] - s[t]``.
+    The helper field is consumed by this transform and never reaches the
+    model.
+    """
+
+    mask: Sequence[bool] | None
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "actions" not in data or self.mask is None:
+            return data
+
+        if "action_states" not in data:
+            raise KeyError("Aligned delta actions require time-aligned action_states")
+
+        actions = data["actions"]
+        action_states = np.asarray(data.pop("action_states"))
+        mask = np.asarray(self.mask)
+        dims = mask.shape[-1]
+        if action_states.shape[:-1] != actions.shape[:-1] or action_states.shape[-1] < dims:
+            raise ValueError(
+                f"action_states shape {action_states.shape} is not aligned with actions shape {actions.shape}"
+            )
+        actions[..., :dims] -= np.where(mask, action_states[..., :dims], 0)
+        data["actions"] = actions
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
 class TokenizePrompt(DataTransformFn):
     tokenizer: _tokenizer.PaligemmaTokenizer
     discrete_state_input: bool = False

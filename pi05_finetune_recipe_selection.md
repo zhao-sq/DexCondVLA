@@ -10,7 +10,7 @@
 | 可训练主体 | 仅 action expert |
 | Action projections | `action_in_proj` 与 `action_out_proj` 从零初始化并训练 |
 | Action dimension | 58 |
-| Action representation | Bench2Dex 原始 absolute joint-position command |
+| Action representation | 三选一：absolute、`a[t+k]-s[t]`、逐时间点对齐的 `a[t+k]-s[t+k]`（全部 58 维） |
 | Main camera | `cam_overhead` → `base_0_rgb` |
 | Left wrist camera | `cam_wrist_left` → `left_wrist_0_rgb` |
 | Right wrist camera | `cam_wrist_right` → `right_wrist_0_rgb` |
@@ -21,6 +21,20 @@
 | Virtual environment | `/mnt/ssd1/szhao/DexTool/openpi_env` |
 
 数据管线已使用 Task 26 的 `episode_000000.hdf5` 端到端验证：homing 截断、有效帧过滤、三路 JPEG 解码、58 维 state/action、quantile normalization、224×224 resize、prompt tokenization 和 batching 均通过。完整 100 条数据也已通过 schema 扫描；`action_horizon=50` 时共有 59,038 个可训练 frame-start samples。
+
+三种 action label 通过独立 config 切换：
+
+| 模式 | Config | Label | 推理时恢复 absolute target |
+|---|---|---|---|
+| Absolute | `pi05_bench2dex_task26_action_expert` | `a[t+k]` | 不转换 |
+| Chunk-start state delta | `pi05_bench2dex_task26_action_expert_state_delta` | `a[t+k]-s[t]` | `s[t]+delta[k]` |
+| Time-aligned dynamics delta | `pi05_bench2dex_task26_action_expert_aligned_delta` | `a[t+k]-s[t+k]` | 每步执行时用实时 `s[t+k]+delta[k]` |
+
+三种模式的 `action_horizon` 都保持 50；aligned delta 不把 horizon 设为 1。
+模型仍一次预测 50 个 delta，但 evaluator 在消费 action queue 时逐步读取
+实时 qpos，并计算 `absolute_target=s_live+delta`，不累计之前的 tracking
+error。三种 config 必须分别计算 normalization statistics。旧的 absolute
+config 和 checkpoint 语义保持不变。
 
 > 注意：发布的 Task 26 全部 100 个 replay 文件均标记为 `meta/success=False` 和 `meta/demo_eligible=False`。当前 loader 与 Bench2Dex 官方 π₀.₅ loader 一样不按这两个字段过滤；在正式训练前需要单独决定是否接受这些 demonstrations，或向数据发布方确认 metadata 的含义。
 
