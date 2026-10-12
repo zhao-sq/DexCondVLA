@@ -20,6 +20,7 @@ import openpi.models.model as _model
 import openpi.shared.array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.checkpoints as _checkpoints
+import openpi.training.code_snapshot as _code_snapshot
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
 import openpi.training.optimizer as _optimizer
@@ -215,6 +216,12 @@ def main(config: _config.TrainConfig):
         overwrite=config.overwrite,
         resume=config.resume,
     )
+    if jax.process_index() == 0:
+        _code_snapshot.save_code_snapshot(
+            config.checkpoint_dir,
+            config=config,
+            launch_kind="resume" if resuming else "new",
+        )
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
 
     data_loader = _data_loader.create_data_loader(

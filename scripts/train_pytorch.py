@@ -43,6 +43,7 @@ import wandb
 import openpi.models.pi0_config
 import openpi.models_pytorch.pi0_pytorch
 import openpi.shared.normalize as _normalize
+import openpi.training.code_snapshot as _code_snapshot
 import openpi.training.config as _config
 import openpi.training.data_loader as _data
 
@@ -344,6 +345,11 @@ def train_loop(config: _config.TrainConfig):
 
     # Initialize wandb (only on main process)
     if is_main:
+        _code_snapshot.save_code_snapshot(
+            config.checkpoint_dir,
+            config=config,
+            launch_kind="resume" if resuming else "new",
+        )
         init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
 
     # Build data loader using the unified data loader
