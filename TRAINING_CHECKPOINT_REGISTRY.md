@@ -410,7 +410,8 @@ Action Expert LR remain intentionally separate.
 ## `task26_dual_expert_predcond_stopgrad_bs64_v1_20261012_235520`
 
 - Started: launch preparation began `2026-10-12 23:55:20 PDT`
-- Status: batch-64 remote smoke pending
+- Status: batch-64 joint compute smoke passed; DataLoader shutdown cleanup fix
+  pending final verification
 - Purpose: same architecture and optimization as
   `task26_dual_expert_predcond_stopgrad_v1_20261012_233955`, testing and, if it
   fits, formally using the original config batch size 64.
@@ -429,3 +430,12 @@ Action Expert LR remain intentionally separate.
 - Optimization: VLA default config cosine schedule with peak `5e-5`; Hand
   AdamW `1e-4`; batch 64; 20,000 steps; save/validate every 1,000 steps.
 - Checkpoint retention: latest plus minimum combined fixed-validation loss.
+
+### Status history
+
+- `2026-10-13 00:12 PDT`: batch-64 joint computation completed two steps
+  without OOM at `XLA_PYTHON_CLIENT_MEM_FRACTION=0.80`. Step 1 VLA/Hand losses
+  were `0.156778/1.404863`; step 2 losses were `0.142524/1.378899`. Cached
+  throughput was 0.255 step/s (about 3.92 seconds/step). The smoke then exposed
+  a DataLoader-worker exception only during interpreter teardown, so an
+  explicit loader close was added before formal launch.

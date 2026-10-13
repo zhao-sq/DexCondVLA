@@ -378,6 +378,7 @@ def main():
                 flush=True,
             )
     manager.wait_until_finished()
+    training_batches.close()
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 cd /workspace/DexCondVLA
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.55
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.80
 export OPENPI_DATA_HOME=/workspace/DexTool/openpi_assets/openpi-cache
 export OPENPI_CHECKPOINT_USE_OCDBT=0
 
