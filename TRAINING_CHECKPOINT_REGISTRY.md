@@ -239,7 +239,7 @@ fraction is reduced from 0.8 to 0.4. It is a fresh initialization from
 ## `task26_dual_expert_gtcond_v1_20261012_223318`
 
 - Started: launch preparation began `2026-10-12 22:33:18 PDT`
-- Status: preparing remote smoke test
+- Status: smoke tests passed; preparing the 20,000-step remote launch
 - Purpose: jointly train the Task26 dual-expert policy with a fine-tuned π₀.₅
   arm/activity Action Expert and a from-scratch shared Hand DiT.
 - Server: Vast instance `136.175.252.91:35499`, RTX PRO 6000 Blackwell Server
@@ -256,7 +256,8 @@ fraction is reduced from 0.8 to 0.4. It is a fresh initialization from
 - Log directory:
   `/workspace/DexTool/openpi_logs/task26_dual_expert_gtcond_v1_20261012_223318`
 - Selected checkpoint: not selected yet
-- Code snapshots: to be populated by both component entrypoints at launch
+- Code snapshots: both component checkpoint directories contain
+  `code_snapshots/LATEST`
 - Device: GPU 0
 
 ### Setting
@@ -274,6 +275,8 @@ fraction is reduced from 0.8 to 0.4. It is a fresh initialization from
   `action_out_proj`; VLM/SigLIP remain frozen.
 - VLA optimization: batch 32; 20,000 steps; peak LR `2e-5`; 500-step warmup;
   cosine decay to `2e-6`; EMA 0.99; gradient clipping 1.0.
+- VLA checkpointing on this server: non-OCDBT Zarr via
+  `OPENPI_CHECKPOINT_USE_OCDBT=0`, with no byte limiter; save interval 1,000.
 - Hand target: ground-truth left and right `(50, 22)` hand-joint chunks.
 - Hand condition in this stage: corresponding ground-truth `(50, 8)` arm
   joints plus side-specific activity label, detached from the VLA.
@@ -305,3 +308,17 @@ uses the larger `1e-4` learning rate.
   created. The default cu126 PyTorch wheel was replaced with the official cu128
   wheel after an `sm_120` incompatibility was detected. Both PyTorch and JAX
   then completed CUDA tensor smoke tests successfully.
+- `2026-10-12 22:46 PDT`: generated the remote arm-only normalization stats
+  from all 922 batches. Verified state width 14, action width 16, and distinct
+  left/right activity channels at action indices 7 and 15.
+- `2026-10-12 22:56 PDT`: Hand DiT completed a three-step smoke test with
+  losses 1.362572, 1.442464, and 1.370296. The final smoke checkpoint is
+  `step_00000003.pt` and is 472 MiB.
+- `2026-10-12 23:18 PDT`: VLA batch-32 forward/backward smoke steps completed
+  without OOM (losses 0.1495, 0.1658, and 0.1355). Default OCDBT checkpointing
+  stalled on the container overlay, so commit `0009d6b` added opt-in checkpoint
+  backend controls. Non-OCDBT saving without a byte limiter then finalized a
+  resumable checkpoint at step 1 in 46 seconds, with measured write throughput
+  of 158--303 MiB/s. The reduced-batch checkpoint-only retry does not change
+  model, optimizer, or checkpoint shapes; the formal resume returns to batch
+  32.
