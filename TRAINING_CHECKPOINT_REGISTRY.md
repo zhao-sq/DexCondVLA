@@ -410,8 +410,7 @@ Action Expert LR remain intentionally separate.
 ## `task26_dual_expert_predcond_stopgrad_bs64_v1_20261012_235520`
 
 - Started: launch preparation began `2026-10-12 23:55:20 PDT`
-- Status: batch-64 joint compute smoke passed; DataLoader shutdown cleanup fix
-  pending final verification
+- Status: formal 20,000-step batch-64 training running
 - Purpose: same architecture and optimization as
   `task26_dual_expert_predcond_stopgrad_v1_20261012_233955`, testing and, if it
   fits, formally using the original config batch size 64.
@@ -439,3 +438,15 @@ Action Expert LR remain intentionally separate.
   throughput was 0.255 step/s (about 3.92 seconds/step). The smoke then exposed
   a DataLoader-worker exception only during interpreter teardown, so an
   explicit loader close was added before formal launch.
+- `2026-10-13 00:16 PDT`: repeated the same two-step batch-64 smoke after the
+  explicit close change. It reproduced the same losses and 0.256 cached
+  steps/s, then exited cleanly with no worker error.
+- `2026-10-13 00:18 PDT`: launched the formal run under Supervisor program
+  `task26_dual_joint`, PID 29616 at launch. Verified
+  `code_snapshots/LATEST`, 78.4 GiB allocated GPU memory, and repository commit
+  `d753637`.
+- `2026-10-13 00:24 PDT`: step 40 completed. The compile-inclusive first
+  20-step window ran at 0.102 steps/s; the steady step 21--40 window ran at
+  0.251 steps/s. VLA loss averaged 0.117249 and Hand loss 0.788547 in the
+  latter window. Estimated completion is about 22--23 hours after launch,
+  including validation/checkpoint overhead.
