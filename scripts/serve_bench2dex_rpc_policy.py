@@ -22,8 +22,12 @@ from typing import Any
 
 import jax
 import numpy as np
+import torch
 
+from openpi.models_pytorch.dinov3_wrist_encoder import Dinov3WristEncoder
 from openpi.policies import policy_config
+from openpi.policies.dual_expert_hand_policy import DualExpertHandPolicy
+from openpi.policies.dual_expert_hand_policy import load_hand_dit_checkpoint
 from openpi.training import config as training_config
 
 DEFAULT_WARMUP_PROMPT = (
@@ -38,9 +42,7 @@ DEFAULT_WARMUP_PROMPT = (
 TASK26_ALOHA_LEFT_ARM_INDICES = np.asarray((0, 1, 3, 5, 7, 9), dtype=np.int64)
 TASK26_ALOHA_RIGHT_ARM_INDICES = np.asarray((2, 4, 6, 8, 10, 12), dtype=np.int64)
 TASK26_ALOHA_ACTION_INDICES = np.asarray((*range(6), *range(7, 13)), dtype=np.int64)
-TASK26_ALOHA_FULL_INDICES = np.concatenate(
-    (TASK26_ALOHA_LEFT_ARM_INDICES, TASK26_ALOHA_RIGHT_ARM_INDICES)
-)
+TASK26_ALOHA_FULL_INDICES = np.concatenate((TASK26_ALOHA_LEFT_ARM_INDICES, TASK26_ALOHA_RIGHT_ARM_INDICES))
 
 
 class _NumpyEncoder(json.JSONEncoder):
@@ -93,8 +95,6 @@ def _send_message(sock: socket.socket, payload: Any) -> None:
 
 
 def _extract_full_state(raw: dict[str, Any]) -> np.ndarray:
-    observation = raw.get("observation", raw)
-
     joint_action = raw.get("joint_action", {})
     state_value = joint_action.get("vector", joint_action.get("qpos"))
     if state_value is None:
@@ -220,6 +220,7 @@ class Bench2DexPolicyServer:
         port: int,
         action_horizon: int,
         metadata: dict[str, Any],
+        *,
         task26_aloha_arm_only: bool = False,
     ) -> None:
         self._policy = policy
@@ -315,6 +316,21 @@ def main() -> None:
     parser.add_argument("--warmup-image-width", type=int, default=640)
     parser.add_argument("--warmup-prompt", default=DEFAULT_WARMUP_PROMPT)
     parser.add_argument(
+        "--hand-dit-checkpoint",
+        help="Enable dual-expert inference using this trained hand-only checkpoint.",
+    )
+    parser.add_argument(
+        "--dinov3-repo",
+        default="/mnt/ssd1/szhao/DexTool/dinov3",
+        help="Official facebookresearch/dinov3 checkout used by the frozen wrist encoder.",
+    )
+    parser.add_argument(
+        "--dinov3-checkpoint",
+        default="/mnt/ssd1/szhao/LeveFD/dinov3_vitb16.pth",
+    )
+    parser.add_argument("--hand-device", default="cuda:0")
+    parser.add_argument("--hand-flow-steps", type=int, default=10)
+    parser.add_argument(
         "--task26-aloha-arm-only",
         action="store_true",
         help=(
@@ -326,20 +342,58 @@ def main() -> None:
 
     config = training_config.get_config(args.config)
     action_representation = getattr(config.data, "action_representation", "absolute")
+    task26_arm_vla = bool(getattr(config.data, "arm_only", False))
     metadata = {
         "config": config.name,
         "checkpoint": str(pathlib.Path(args.checkpoint).resolve()),
         "action_representation": action_representation,
         "action_horizon": args.action_horizon,
-        "action_dim": config.model.action_dim,
+        "model_action_dim": config.model.action_dim,
+        "action_dim": 14 if task26_arm_vla else config.model.action_dim,
     }
     if args.task26_aloha_arm_only:
         if config.name != "pi05_aloha":
             raise ValueError("--task26-aloha-arm-only requires --config pi05_aloha")
         metadata["action_dim"] = 58
         metadata["embodiment_mapping"] = "task26_aloha_arm_only"
-    logging.info("Policy metadata: %s", metadata)
+    if args.hand_dit_checkpoint:
+        if args.task26_aloha_arm_only:
+            raise ValueError("The hand DiT cannot be combined with the ALOHA zero-shot mapping")
+        if not task26_arm_vla:
+            raise ValueError(
+                "The hand DiT requires --config pi05_bench2dex_task26_dual_expert_arm "
+                "so the VLA supplies physical 16D arm/activity actions"
+            )
+        if action_representation != "absolute":
+            raise ValueError("The first hand DiT runtime supports only the absolute-action Task26 pipeline")
+    elif task26_arm_vla:
+        raise ValueError("The Task26 16D arm/activity VLA requires --hand-dit-checkpoint to compose a 58D action")
+
     policy = policy_config.create_trained_policy(config, args.checkpoint)
+    if args.hand_dit_checkpoint:
+        device = torch.device(args.hand_device)
+        hand_model, normalization, hand_checkpoint = load_hand_dit_checkpoint(args.hand_dit_checkpoint, device=device)
+        wrist_encoder = (
+            Dinov3WristEncoder(
+                args.dinov3_repo,
+                args.dinov3_checkpoint,
+            )
+            if hand_model.config.condition_on_vision
+            else None
+        )
+        policy = DualExpertHandPolicy(
+            policy,
+            hand_model,
+            wrist_encoder,
+            normalization,
+            num_hand_steps=args.hand_flow_steps,
+            device=device,
+        )
+        metadata.update(policy.metadata)
+        metadata["action_dim"] = 58
+        metadata["hand_checkpoint"] = str(pathlib.Path(args.hand_dit_checkpoint).resolve())
+        metadata["hand_checkpoint_step"] = int(hand_checkpoint["step"])
+    logging.info("Policy metadata: %s", metadata)
     _warm_up_policy(
         policy,
         runs=args.warmup_runs,

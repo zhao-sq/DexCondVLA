@@ -3,6 +3,64 @@ import numpy as np
 from openpi.training import config
 
 
+def test_task26_dual_expert_arm_config_and_projection(tmp_path):
+    train_config = config.get_config("pi05_bench2dex_task26_dual_expert_arm")
+
+    assert train_config.model.action_dim == 32
+    assert train_config.model.action_horizon == 50
+    assert train_config.data.arm_only is True
+    assert train_config.data.assets.asset_id == "bench2dex_task26_dual_expert_arm_activity"
+    data_config = train_config.data.create(tmp_path, train_config.model)
+    assert data_config.dataset_processor_options["source_action_dim"] == 58
+
+    state = np.arange(58, dtype=np.float32)
+    actions = np.stack((state, state + 100.0))
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+    sample = {
+        "state": state,
+        "actions": actions,
+        "left_gripper_active_actions": np.asarray([0.0, 1.0], dtype=np.float32),
+        "right_gripper_active_actions": np.asarray([1.0, 0.0], dtype=np.float32),
+        "prompt": "move both arms",
+        "images": {
+            "cam_overhead": image,
+            "cam_wrist_left": image,
+            "cam_wrist_right": image,
+        },
+    }
+    for transform in data_config.data_transforms.inputs:
+        sample = transform(sample)
+
+    arm_indices = (0, 1, 3, 5, 7, 9, 11, 2, 4, 6, 8, 10, 12, 13)
+    np.testing.assert_array_equal(sample["state"], state[list(arm_indices)])
+    expected_actions = np.column_stack(
+        (
+            actions[:, list(arm_indices[:7])],
+            np.asarray([0.0, 1.0], dtype=np.float32),
+            actions[:, list(arm_indices[7:])],
+            np.asarray([1.0, 0.0], dtype=np.float32),
+        )
+    )
+    np.testing.assert_array_equal(sample["actions"], expected_actions)
+
+    for transform in data_config.model_transforms.inputs:
+        sample = transform(sample)
+    assert sample["state"].shape == (32,)
+    assert sample["actions"].shape == (2, 32)
+    np.testing.assert_array_equal(sample["state"][:14], state[list(arm_indices)])
+    np.testing.assert_array_equal(sample["actions"][:, :16], expected_actions)
+    np.testing.assert_array_equal(sample["state"][14:], np.zeros(18, dtype=np.float32))
+    np.testing.assert_array_equal(sample["actions"][:, 16:], np.zeros((2, 16), dtype=np.float32))
+
+    output = {"actions": np.arange(2 * 32, dtype=np.float32).reshape(2, 32)}
+    for transform in data_config.data_transforms.outputs:
+        output = transform(output)
+    assert output["actions"].shape == (2, 16)
+    expected_output = np.arange(2 * 32, dtype=np.float32).reshape(2, 32)[:, :16]
+    expected_output[:, (7, 15)] = 1.0
+    np.testing.assert_array_equal(output["actions"], expected_output)
+
+
 def test_task26_action_expert_config():
     train_config = config.get_config("pi05_bench2dex_task26_action_expert")
 

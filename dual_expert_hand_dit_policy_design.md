@@ -1,6 +1,6 @@
 # Arm-Conditioned Hand DiT: Policy Design Specification
 
-**Status:** Initial implementation proposal (v0.1)  
+**Status:** Updated implementation proposal (v0.2)
 **Goal:** Efficient dexterous manipulation finetuning by separating arm and hand action modeling while preserving fine-grained local visual information.
 
 ## 1. Motivation and Scope
@@ -19,6 +19,7 @@ The Hand Expert **does not directly consume frozen VLM features in v0.1**. This 
 3. Make local hand observation encoding modular and independent of the arm/VLM branch.
 4. Keep gradients from the hand loss out of the Arm Expert in the first version.
 5. Establish a minimal working baseline before adding tactile sensing, additional modalities, or bidirectional feedback.
+6. For bimanual operation, **share one Hand DiT across left and right hands** in v0.2, but predict each hand independently conditioned on its corresponding arm and wrist inputs.
 
 ## 2. System Architecture
 
@@ -58,7 +59,49 @@ The Hand Expert **does not directly consume frozen VLM features in v0.1**. This 
                       Hand action chunk (B, H, D_h)
 ```
 
+For bimanual tasks, the diagram represents **one pass per hand** through the same shared-weight Hand DiT. Each pass uses its own arm chunk, wrist image, and hand state, plus a side identifier. This does not imply left/right hand attention or coordination inside the Hand DiT.
+
 The Arm Expert and Hand Expert have **separate trainable action-model parameters**. They do not need the same Transformer depth, hidden width, or vision-conditioning mechanism.
+
+For Task26, the Arm Expert consumes the same 14D arm-joint state and predicts a
+16D physical action in `[left arm 7, left_gripper_active, right arm 7,
+right_gripper_active]` order. The two binary activity annotations are inferred
+and supervised independently for the left and right hands. The π₀.₅ network itself retains the official `action_dim=32`:
+the input pipeline pads these physical interfaces to 32D and the output
+pipeline crops back to 16D. This preserves direct compatibility with all tensor
+shapes in the official `pi05_base` checkpoint. The Hand Expert consumes each
+side's full 8D prediction as an arm/activity condition, supplies the 44 hand
+channels, and runtime composition restores Task26's native 58D order.
+
+### 2.1 Task26 VLA training contract
+
+The Task26 Arm Expert is trained with the following fixed interface:
+
+| Item | Shape | Semantics |
+|---|---:|---|
+| Current arm state | `(B, 14)` | Left 7 arm joints followed by right 7 arm joints |
+| Image observation | Three RGB views | Overhead, left wrist, and right wrist |
+| Language | One instruction per sample | Standard π₀.₅ prompt input |
+| Physical action target | `(B, 50, 16)` | `[left joints 7, left_active, right joints 7, right_active]` |
+| Internal π₀.₅ action tensor | `(B, 50, 32)` | Physical target padded with 16 zeros for checkpoint compatibility |
+
+`left_active` and `right_active` come from
+`/labels/left_gripper_active` and `/labels/right_gripper_active` respectively.
+They are independently supervised binary channels; neither is copied from the
+other side. At inference, the two physical activity outputs are thresholded at
+`0.5` to produce exact 0/1 values.
+
+After inference, split the 16D VLA result into two temporally aligned Hand DiT
+conditions:
+
+```text
+left condition:  [left joints 7, left_active]   -> (B, 50, 8)
+right condition: [right joints 7, right_active] -> (B, 50, 8)
+```
+
+The activity values are conditioning signals only. Runtime scatters the 14 arm
+joint predictions into the native action layout and combines them with the 44
+Hand DiT joint predictions, so the environment still receives `(B, 50, 58)`.
 
 ## 3. Tensor Interfaces
 
@@ -66,7 +109,7 @@ Let:
 
 - `B`: batch size
 - `H`: predicted action horizon, shared initially between the two experts
-- `D_a`: arm action dimension (e.g., 7)
+- `D_a`: per-side arm/activity condition dimension (8 for Task26)
 - `D_h`: hand action dimension (hardware dependent)
 - `N_v`: number of retained wrist-image patch tokens
 - `d`: Hand DiT model dimension, initially 512
@@ -255,7 +298,69 @@ hand_velocity = hand_dit(noisy_hand_chunk, flow_time, condition_tokens)
 
 The encoder wrapper should also support **precomputed visual features** so representation experiments do not require changes to the Hand DiT itself. For experiments evaluating a trainable visual backbone, switch to raw images and enable encoder gradients explicitly.
 
-## 9. Risks and Immediate Validation Checks
+## 9. Bimanual Hand Policy: Shared Weights, Separate Predictions (v0.2)
+
+**Default choice:** Use **one shared Hand DiT** for both hands, invoked separately for the left and right side. Do not instantiate two independent sets of Hand DiT weights. This reduces parameters and lets data from both hands update the same hand-control model. Shared weights do **not** by themselves establish bimanual coordination.
+
+```text
+Left arm chunk  + Left wrist image  + Left hand state  + LEFT embedding
+                              |
+                              v
+                      Shared Hand DiT ----> Left hand action chunk
+                              ^
+                              |
+Right arm chunk + Right wrist image + Right hand state + RIGHT embedding
+
+  (same weights, separate passes; no direct left-right attention in v0.2)
+```
+
+### 9.1 Inputs and outputs
+
+For each side `k in {left, right}`, apply exactly the same conditioning pipeline:
+
+- `A_k`: corresponding arm-action chunk `(B, H, D_a)`; align the two sides to the same physical timestamps.
+- `I_k`: corresponding wrist-camera image, encoded with a **shared frozen DINOv3** and a shared projection head initially.
+- `s_k`: corresponding finger joint state, projected with a shared state encoder.
+- `e_k`: learned left/right side embedding, added to the condition tokens (or supplied as a distinct side token).
+- `x_tau,k`: noisy **hand-only** action chunk `(B, H, D_h)`; output velocity `v_hat_k` of the same shape.
+
+```python
+# Conceptual pseudocode: one shared module, twice per batch
+left_cond = encode_hand_condition(left_arm.detach(), left_wrist, left_state, side='left')
+right_cond = encode_hand_condition(right_arm.detach(), right_wrist, right_state, side='right')
+
+v_left = shared_hand_dit(noisy_left_hand, flow_time, left_cond)
+v_right = shared_hand_dit(noisy_right_hand, flow_time, right_cond)
+loss = 0.5 * (flow_matching_loss(v_left, target_left) +
+              flow_matching_loss(v_right, target_right))
+```
+
+Alternatively, stack left/right examples along the batch dimension and make **one batched forward pass**; this is still two independent predictions with shared weights, not joint action modeling.
+
+### 9.2 Important implementation details
+
+1. **Coordinate conventions:** express each wrist and arm condition in a consistently defined hand/wrist-local frame where possible. Otherwise a shared model may waste capacity learning left/right geometric conventions.
+2. **Hand morphology:** if the left and right hands have mirrored joint definitions, define a clear joint-index mapping and appropriate sign / frame conventions. Do not assume naive copying of actions between hands is valid.
+3. **Side identity:** start with learned `LEFT`/`RIGHT` embeddings; ablate them later if the coordinate transforms already normalize handedness.
+4. **Missing hand:** allow a side-validity mask so single-handed demonstrations can train the same shared model without inventing labels for the absent hand.
+5. **Cross-hand coordination:** in v0.2, coordination is **indirect**, via correlated arm plans and visible observations. This can fail for object handovers or simultaneous force-sensitive grasps.
+6. **Loss accounting:** sum or average over the available hands, with mask-aware normalization, so bimanual examples do not accidentally receive twice the weight of single-hand examples.
+
+### 9.3 Future optional variant: Joint bimanual decoding
+
+If shared independent predictions fail on strongly coupled bimanual tasks, keep the same shared backbone but concatenate both hands' **noisy action tokens** and both sides' condition tokens in one DiT forward pass; use side embeddings and output two hand chunks together. This permits direct cross-hand attention, but increases sequence length and makes the ablation less clean. Do **not** implement this until a measurable coordination failure justifies it.
+
+### 9.4 Minimum bimanual ablation
+
+| Variant | Hand-model weights | Interaction between hands | Main question |
+|---|---|---|---|
+| B0 (default) | Shared | None directly; separate inference | Best low-complexity baseline? |
+| B1 | Separate left/right | None directly | Is side-specific capacity needed? |
+| B2 (later) | Shared | Joint attention over both hand chunks | Does explicit coordination help? |
+
+Report **total parameters, training time, per-hand success, bimanual task success, and inference latency**. Sharing weights saves parameters, but does not necessarily halve execution FLOPs when predicting both hands.
+
+## 10. Risks and Immediate Validation Checks
 
 1. **Mismatch in arm-conditioning distribution:** predicted versus GT arm chunks can differ. Evaluate with predicted chunks early.
 2. **Local visual observability:** a wrist image may not reveal occluded contacts or forces. Tactile or depth may become necessary for specific tasks, but are outside v0.1.
@@ -264,7 +369,7 @@ The encoder wrapper should also support **precomputed visual features** so repre
 5. **Capacity and compute:** the lightweight Hand DiT is additional to the Arm Expert and the wrist encoder; report whole-system costs, not only the Hand DiT parameter count.
 6. **Flow and control timing:** align action chunk horizons and execution rates so predicted arm motion and hand control refer to the same future times.
 
-## 10. Immediate Implementation Plan
+## 11. Immediate Implementation Plan
 
 **Stage 1:** Implement Hand DiT and train with GT arm chunk + precomputed frozen DINOv3 wrist patch features + hand state. Confirm tensor shapes, conditioning masks, loss decrease, and sample quality.
 
@@ -276,4 +381,4 @@ The encoder wrapper should also support **precomputed visual features** so repre
 
 ---
 
-**One-line summary:** Retain π₀.₅'s global VLM-conditioned Arm Expert, and add a lightweight local-vision-dominant Hand DiT that cross-attends to **temporally aligned arm-action tokens, spatial wrist-image patch tokens, and hand-state tokens**, without direct VLM conditioning in the first version.
+**One-line summary:** Retain π₀.₅'s global VLM-conditioned Arm Expert, and add a lightweight local-vision-dominant Hand DiT that cross-attends to **temporally aligned arm-action tokens, spatial wrist-image patch tokens, and hand-state tokens**, without direct VLM conditioning in the first version. For bimanual tasks, **share Hand DiT weights across left/right hands, but predict each hand separately using side-specific inputs and embeddings**.

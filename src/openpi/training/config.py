@@ -368,24 +368,48 @@ class Bench2DexDataConfig(DataConfigFactory):
     """Configuration for reading Bench2Dex replay HDF5 files in-place."""
 
     default_prompt: str | None = None
-    # Mutually exclusive representation of the model's 58D action labels:
+    # Mutually exclusive representation of the selected physical action labels
+    # (58D full body, or 16D [left joints 7, active, right joints 7, active]
+    # when arm_only=True):
     # - absolute: a[t+k]
     # - state_delta: a[t+k] - s[t]
     # - aligned_delta: a[t+k] - s[t+k]
     action_representation: Literal["absolute", "state_delta", "aligned_delta"] = "absolute"
     dataset_processor: str = "bench2dex_hdf5"
     camera_names: tuple[str, str, str] = ("cam_overhead", "cam_wrist_left", "cam_wrist_right")
+    # Keep the π0.5 network at its pretrained 32D width while exposing only
+    # 14D arm state and 16D arm-joints-plus-activity action as the physical VLA
+    # interface.
+    arm_only: bool = False
     assets: AssetsConfig = dataclasses.field(default_factory=lambda: AssetsConfig(asset_id="bench2dex_task26"))
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        if model_config.action_dim != 58:
-            raise ValueError(f"Bench2Dex Task 26 requires action_dim=58, got {model_config.action_dim}")
-        data_transforms = _transforms.Group(
-            inputs=[bench2dex_policy.Bench2DexInputs(action_dim=model_config.action_dim)],
-            outputs=[bench2dex_policy.Bench2DexOutputs(action_dim=model_config.action_dim)],
+        if self.arm_only:
+            if self.action_representation != "absolute":
+                raise ValueError("The 16D arm/activity VLA currently requires absolute action labels")
+            if model_config.action_dim != 32:
+                raise ValueError(
+                    f"Task26 arm-only π0.5 must retain pretrained action_dim=32, got {model_config.action_dim}"
+                )
+            data_transforms = _transforms.Group(
+                inputs=[bench2dex_policy.Bench2DexArmInputs()],
+                outputs=[bench2dex_policy.Bench2DexArmOutputs()],
+            )
+            physical_action_dim = bench2dex_policy.TASK26_BIMANUAL_ARM_ACTION_DIM
+        else:
+            if model_config.action_dim != 58:
+                raise ValueError(f"Bench2Dex Task 26 requires action_dim=58, got {model_config.action_dim}")
+            data_transforms = _transforms.Group(
+                inputs=[bench2dex_policy.Bench2DexInputs(action_dim=model_config.action_dim)],
+                outputs=[bench2dex_policy.Bench2DexOutputs(action_dim=model_config.action_dim)],
+            )
+            physical_action_dim = model_config.action_dim
+        action_mask = (
+            _transforms.make_bool_mask(7, -1, 7, -1)
+            if self.arm_only
+            else _transforms.make_bool_mask(physical_action_dim)
         )
-        action_mask = _transforms.make_bool_mask(model_config.action_dim)
         match self.action_representation:
             case "absolute":
                 pass
@@ -410,6 +434,8 @@ class Bench2DexDataConfig(DataConfigFactory):
                 "camera_names": self.camera_names,
                 "prompt": self.default_prompt,
                 "include_action_states": self.action_representation == "aligned_delta",
+                "include_gripper_activity": self.arm_only,
+                "source_action_dim": 58,
             },
         )
 
@@ -819,6 +845,43 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    # Dual-expert Task26 arm VLA. The robot-facing action is 16D
+    # [left arm 7, active, right arm 7, active], while the network stays at the official
+    # π0.5 32D width so every pi05_base parameter loads without reshaping.
+    TrainConfig(
+        name="pi05_bench2dex_task26_dual_expert_arm",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            max_token_len=280,
+        ),
+        data=Bench2DexDataConfig(
+            repo_id="/mnt/ssd1/szhao/DexTool/bench2dex/task26/replay-generalization",
+            dataset_processor="bench2dex_hdf5",
+            camera_names=("cam_overhead", "cam_wrist_left", "cam_wrist_right"),
+            arm_only=True,
+            assets=AssetsConfig(asset_id="bench2dex_task26_dual_expert_arm_activity"),
+        ),
+        batch_size=64,
+        num_workers=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=20_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(
+            weight_decay=1e-10,
+            clip_gradient_norm=1.0,
+        ),
+        ema_decay=0.99,
+        freeze_filter=nnx.Not(nnx_utils.PathRegex(r".*(llm.*_1|action_in_proj|action_out_proj).*")),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        assets_base_dir="/mnt/ssd1/szhao/DexTool/openpi_assets",
+        checkpoint_base_dir="/mnt/ssd1/szhao/DexTool/ckp",
+        num_train_steps=20_000,
     ),
     # Bench2Dex Task26: freeze the vision-language backbone and train only the
     # 300M action expert plus the action input/output projections. The 58D
