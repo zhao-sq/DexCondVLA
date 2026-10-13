@@ -375,6 +375,29 @@ Report **total parameters, training time, per-hand success, bimanual task succes
 
 **Stage 2:** Replace GT arm chunk with predicted Arm Expert output (detached). Run fully deployable closed-loop evaluation.
 
+### Implemented Stage-2 joint trainer (2026-10-12)
+
+`scripts/train_task26_dual_expert_joint.py` implements Stage 2 as one coordinated
+training loop. A single raw Task26 sample batch is transformed into both the
+π₀.₅ batch and the Hand-DiT supervision batch. The π₀.₅ flow-matching forward
+returns both its normal training loss and the clean-action estimate
+`x0_hat = x_t - t * v_theta(x_t, t)`, avoiding a separate multi-step ODE solve
+inside every training iteration.
+
+Only the first physical 16 channels are used, ordered as
+`[left_joint_7, left_active, right_joint_7, right_active]`. They are unnormalized,
+split into two 8D conditions, normalized to the Hand-DiT convention, and copied
+across the JAX-to-PyTorch boundary. The resulting tensor is detached again in
+the Hand condition encoder. Therefore the Hand loss updates only Hand DiT; the
+VLA Action Expert is updated only by its own flow loss. VLM/SigLIP and DINOv3
+remain frozen.
+
+The joint checkpoint directory stores the Orbax VLA state, `hand_dit.pt`, and
+validation metrics together under each numeric step. Validation uses fixed
+batches/noise and ranks checkpoints by
+`vla_validation_loss + hand_validation_loss`. Retention deletes every numeric
+step except `LATEST` and `BEST` (one directory when both pointers coincide).
+
 **Stage 3:** Compare Arm+State, Vision+State, and Arm+Vision+State conditions against the existing π₀.₅ joint-action baseline.
 
 **Stage 4:** Only after a stable result, investigate direct VLM-feature conditioning, alternative patch-token selection, parameter-matched variants, and partial/incorrect hand supervision.

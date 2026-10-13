@@ -239,7 +239,7 @@ fraction is reduced from 0.8 to 0.4. It is a fresh initialization from
 ## `task26_dual_expert_gtcond_v1_20261012_223318`
 
 - Started: launch preparation began `2026-10-12 22:33:18 PDT`
-- Status: running both formal 20,000-step components remotely
+- Status: stopped; superseded before evaluation and checkpoints deleted
 - Purpose: jointly train the Task26 dual-expert policy with a fine-tuned π₀.₅
   arm/activity Action Expert and a from-scratch shared Hand DiT.
 - Server: Vast instance `136.175.252.91:35499`, RTX PRO 6000 Blackwell Server
@@ -332,3 +332,64 @@ uses the larger `1e-4` learning rate.
   0.1393 and gradient norm 0.4324; Hand step-200 loss was 0.245692. The two
   jobs used approximately 51.5 GiB of 97.9 GiB VRAM together with no OOM.
   Launch PIDs were 15181 for VLA and 16860 for Hand.
+- `2026-10-12 23:31 PDT`: stopped both processes after confirming that this
+  launch was two independent optimizations rather than the required same-batch
+  predicted-condition joint training. Both experiment checkpoint directories
+  were deleted as requested; the immutable registry history is retained.
+
+## `task26_dual_expert_predcond_stopgrad_v1_20261012_233955`
+
+- Started: launch preparation began `2026-10-12 23:39:55 PDT`
+- Status: implementation and smoke validation in progress
+- Purpose: same-batch joint training of the pretrained π₀.₅ Action Expert and
+  scratch Hand DiT, with Hand conditioned on VLA predictions and a stopped
+  Hand-to-VLA gradient.
+- Server: Vast instance `136.175.252.91:35499`, RTX PRO 6000 Blackwell Server
+  Edition 96 GB
+- Repository: `/workspace/DexCondVLA`
+- Environment: `/workspace/DexCondVLA/.venv`
+- Dataset: `/workspace/DexTool/bench2dex/task26/replay-generalization`
+- Unified checkpoint directory:
+  `/workspace/DexTool/ckp/pi05_bench2dex_task26_dual_expert_arm/task26_dual_expert_predcond_stopgrad_v1_20261012_233955/{step}`
+- Log:
+  `/workspace/DexTool/openpi_logs/task26_dual_expert_predcond_stopgrad_v1_20261012_233955.log`
+- Selected checkpoint: validation-best pointer `BEST`; not selected yet
+- Code snapshot: must be present at `<checkpoint_dir>/code_snapshots/LATEST`
+- Device: GPU 0
+
+### Setting
+
+- Every optimizer step uses one shared batch for both experts.
+- VLA input: three RGB cameras, language, and current 14D arm state.
+- VLA target/output: `(50, 16)` absolute
+  `[left_joint_7, left_active, right_joint_7, right_active]`, internally padded
+  to the official pretrained 32D width.
+- VLA initialization: official `pi05_base`; VLM/SigLIP frozen; Action Expert
+  plus action projections fine-tuned with the config's cosine schedule peaking
+  at `5e-5`.
+- Hand arm condition: VLA's single-forward denoised 16D estimate, converted
+  back to physical units, split into two 8D side conditions, then explicitly
+  detached before entering Hand DiT.
+- Hand target: ground-truth `(50, 22)` joint chunk for each side. One shared
+  six-layer, width-512, eight-head Hand DiT is initialized from scratch and
+  optimized with AdamW at `1e-4`.
+- Other Hand conditions: frozen DINOv3 ViT-B/16 wrist patch tokens, normalized
+  current 22D hand state, and learned left/right side embedding.
+- Total loss is optimized by two framework-native optimizers; Hand loss cannot
+  update VLA, while VLA flow loss continues to fine-tune the Action Expert.
+- Schedule: batch 4, 20,000 steps, save/validate every 1,000 steps, two fixed
+  validation batches per save.
+- Checkpoint retention: retain only the latest step and the minimum combined
+  validation score (`vla_validation_loss + hand_validation_loss`). If they are
+  the same step, retain only one checkpoint. Each retained step contains the
+  Orbax VLA state, `hand_dit.pt`, and `joint_metrics.json`.
+- Storage backend: `OPENPI_CHECKPOINT_USE_OCDBT=0`; no concurrent-byte limiter.
+
+### Explanation and special changes
+
+This replaces the stopped GT-conditioned two-process run. The deploy-time
+conditioning distribution is now present during training, the two experts see
+the exact same samples, and a single VLA forward supplies both the VLA loss and
+the denoised condition. Crossing JAX to NumPy/Torch plus `.detach()` makes the
+gradient boundary explicit. The larger scratch Hand LR and smaller pretrained
+Action Expert LR remain intentionally separate.

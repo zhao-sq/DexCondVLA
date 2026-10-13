@@ -189,6 +189,18 @@ class Pi0(_model.BaseModel):
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
+        loss, _ = self.compute_loss_and_denoised_actions(rng, observation, actions, train=train)
+        return loss
+
+    def compute_loss_and_denoised_actions(
+        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
+    ) -> tuple[at.Float[at.Array, "*b ah"], _model.Actions]:
+        """Return flow loss and the single-forward clean-action estimate.
+
+        The estimate is x_0 = x_t - t * v_theta(x_t, t).  It intentionally
+        shares the exact noisy training forward pass, so joint downstream
+        experts do not require an additional ODE sampling pass per step.
+        """
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
@@ -211,7 +223,9 @@ class Pi0(_model.BaseModel):
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        denoised_actions = x_t - time_expanded * v_t
+        return loss, denoised_actions
 
     @override
     def sample_actions(

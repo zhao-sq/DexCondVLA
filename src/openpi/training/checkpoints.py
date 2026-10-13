@@ -34,7 +34,12 @@ def _pytree_checkpoint_handler() -> ocp.PyTreeCheckpointHandler:
 
 
 def initialize_checkpoint_dir(
-    checkpoint_dir: epath.Path | str, *, keep_period: int | None, overwrite: bool, resume: bool
+    checkpoint_dir: epath.Path | str,
+    *,
+    keep_period: int | None,
+    overwrite: bool,
+    resume: bool,
+    max_to_keep: int | None = 1,
 ) -> tuple[ocp.CheckpointManager, bool]:
     checkpoint_dir = epath.Path(checkpoint_dir).resolve()
     resuming = False
@@ -61,7 +66,7 @@ def initialize_checkpoint_dir(
             "params": _pytree_checkpoint_handler(),
         },
         options=ocp.CheckpointManagerOptions(
-            max_to_keep=1,
+            max_to_keep=max_to_keep,
             keep_period=keep_period,
             create=False,
             async_options=ocp.AsyncOptions(timeout_secs=7200),
