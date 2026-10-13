@@ -235,3 +235,73 @@ fraction is reduced from 0.8 to 0.4. It is a fresh initialization from
   gradient norm 1.1381, and parameter norm 1801.9016. XLA reported a compiled
   memory requirement of approximately 37.25 GiB, which fits within the 0.40
   allocator fraction; no OOM occurred.
+
+## `task26_dual_expert_gtcond_v1_20261012_223318`
+
+- Started: launch preparation began `2026-10-12 22:33:18 PDT`
+- Status: preparing remote smoke test
+- Purpose: jointly train the Task26 dual-expert policy with a fine-tuned π₀.₅
+  arm/activity Action Expert and a from-scratch shared Hand DiT.
+- Server: Vast instance `136.175.252.91:35499`, RTX PRO 6000 Blackwell Server
+  Edition 96 GB
+- Repository: `/workspace/DexCondVLA`
+- Environment: `/workspace/DexCondVLA/.venv`; PyTorch `2.7.1+cu128`; JAX
+  `0.5.3`
+- Dataset:
+  `/workspace/DexTool/bench2dex/task26/replay-generalization`
+- Arm checkpoint directory:
+  `/workspace/DexTool/ckp/pi05_bench2dex_task26_dual_expert_arm/task26_dual_expert_gtcond_v1_20261012_223318/{step}`
+- Hand checkpoint directory:
+  `/workspace/DexTool/ckp/task26_dual_expert_gtcond_v1_20261012_223318_hand/step_*.pt`
+- Log directory:
+  `/workspace/DexTool/openpi_logs/task26_dual_expert_gtcond_v1_20261012_223318`
+- Selected checkpoint: not selected yet
+- Code snapshots: to be populated by both component entrypoints at launch
+- Device: GPU 0
+
+### Setting
+
+- VLA observation: overhead, left-wrist, and right-wrist RGB; language prompt;
+  current 14D arm-joint state.
+- VLA physical target: absolute `(50, 16)` chunk ordered as
+  `[left arm joints 7, left_active, right arm joints 7, right_active]`, padded
+  to the pretrained internal 32D width.
+- Activity supervision: independent
+  `/labels/left_gripper_active` and `/labels/right_gripper_active`; inference
+  threshold is 0.5.
+- VLA initialization: `gs://openpi-assets/checkpoints/pi05_base/params`.
+- VLA trainable modules: π₀.₅ Action Expert, `action_in_proj`, and
+  `action_out_proj`; VLM/SigLIP remain frozen.
+- VLA optimization: batch 32; 20,000 steps; peak LR `2e-5`; 500-step warmup;
+  cosine decay to `2e-6`; EMA 0.99; gradient clipping 1.0.
+- Hand target: ground-truth left and right `(50, 22)` hand-joint chunks.
+- Hand condition in this stage: corresponding ground-truth `(50, 8)` arm
+  joints plus side-specific activity label, detached from the VLA.
+- Hand model: one shared six-block Hand DiT, width 512, eight heads, learned
+  side embeddings; initialized from scratch.
+- Hand vision: frozen DINOv3 ViT-B/16 wrist patch features from
+  `/workspace/DexTool/assets/dinov3_vitb16.pth`.
+- Hand optimization: batch 8; 20,000 steps; constant LR `1e-4`; AdamW weight
+  decay `1e-4`; gradient clipping 1.0.
+- Execution: one tmux session with separate `vla` and `hand` windows on the
+  same GPU. The losses and optimizers are independent in this GT-conditioned
+  stage.
+
+### Explanation and special changes
+
+Relative to the earlier 58D Action Expert runs, π₀.₅ now predicts only the 14
+arm joints plus two side-specific activity channels. Relative to a deployable
+predicted-arm-conditioned hand policy, this initial run deliberately uses
+ground-truth arm/activity chunks for Hand DiT so the complete data, DINOv3,
+and flow-matching training path can be validated before introducing VLA
+prediction error. The smaller VLA learning rate protects pretrained Action
+Expert weights during fine-tuning, while the randomly initialized Hand DiT
+uses the larger `1e-4` learning rate.
+
+### Status history
+
+- `2026-10-12 22:33:18 PDT`: remote repository cloned at commit `28d99fc`;
+  dataset and DINOv3 assets placed under `/workspace/DexTool`; project `.venv`
+  created. The default cu126 PyTorch wheel was replaced with the official cu128
+  wheel after an `sm_120` incompatibility was detected. Both PyTorch and JAX
+  then completed CUDA tensor smoke tests successfully.
