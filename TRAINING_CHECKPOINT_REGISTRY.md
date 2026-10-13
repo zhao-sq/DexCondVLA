@@ -340,7 +340,8 @@ uses the larger `1e-4` learning rate.
 ## `task26_dual_expert_predcond_stopgrad_v1_20261012_233955`
 
 - Started: launch preparation began `2026-10-12 23:39:55 PDT`
-- Status: remote two-step joint smoke passed; formal launch pending
+- Status: stopped during initial batch-4 compilation; no training step or
+  numeric checkpoint was produced
 - Purpose: same-batch joint training of the pretrained π₀.₅ Action Expert and
   scratch Hand DiT, with Hand conditioned on VLA predictions and a stopped
   Hand-to-VLA gradient.
@@ -401,3 +402,30 @@ Action Expert LR remain intentionally separate.
   `0.196499/1.341047`; step 2 produced `0.117124/1.317484`. The first XLA
   compilation took about seven minutes, while the cached second coordinated
   step ran at 4.896 steps/s. No training checkpoint was written by the smoke.
+- `2026-10-12 23:54 PDT`: a formal batch-4 process was launched under
+  Supervisor and its `code_snapshots/LATEST` was verified, then stopped at the
+  user's request before the initial compilation completed so the default
+  batch 64 could be tested. Only `code_snapshots/` exists in this run.
+
+## `task26_dual_expert_predcond_stopgrad_bs64_v1_20261012_235520`
+
+- Started: launch preparation began `2026-10-12 23:55:20 PDT`
+- Status: batch-64 remote smoke pending
+- Purpose: same architecture and optimization as
+  `task26_dual_expert_predcond_stopgrad_v1_20261012_233955`, testing and, if it
+  fits, formally using the original config batch size 64.
+- Server: Vast instance `136.175.252.91:35499`, RTX PRO 6000 Blackwell Server
+  Edition 96 GB
+- Repository/environment: `/workspace/DexCondVLA`,
+  `/workspace/DexCondVLA/.venv`
+- Dataset: `/workspace/DexTool/bench2dex/task26/replay-generalization`
+- Unified checkpoint directory:
+  `/workspace/DexTool/ckp/pi05_bench2dex_task26_dual_expert_arm/task26_dual_expert_predcond_stopgrad_bs64_v1_20261012_235520/{step}`
+- Log:
+  `/workspace/DexTool/openpi_logs/task26_dual_expert_predcond_stopgrad_bs64_v1_20261012_235520.log`
+- Initialization/freeze boundary: official `pi05_base`; VLM/SigLIP and DINOv3
+  frozen; Action Expert fine-tuned; Hand DiT scratch; Hand-to-VLA gradient
+  stopped.
+- Optimization: VLA default config cosine schedule with peak `5e-5`; Hand
+  AdamW `1e-4`; batch 64; 20,000 steps; save/validate every 1,000 steps.
+- Checkpoint retention: latest plus minimum combined fixed-validation loss.
