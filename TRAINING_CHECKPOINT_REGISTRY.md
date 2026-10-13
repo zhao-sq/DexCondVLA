@@ -239,7 +239,7 @@ fraction is reduced from 0.8 to 0.4. It is a fresh initialization from
 ## `task26_dual_expert_gtcond_v1_20261012_223318`
 
 - Started: launch preparation began `2026-10-12 22:33:18 PDT`
-- Status: smoke tests passed; preparing the 20,000-step remote launch
+- Status: running both formal 20,000-step components remotely
 - Purpose: jointly train the Task26 dual-expert policy with a fine-tuned π₀.₅
   arm/activity Action Expert and a from-scratch shared Hand DiT.
 - Server: Vast instance `136.175.252.91:35499`, RTX PRO 6000 Blackwell Server
@@ -322,3 +322,13 @@ uses the larger `1e-4` learning rate.
   of 158--303 MiB/s. The reduced-batch checkpoint-only retry does not change
   model, optimizer, or checkpoint shapes; the formal resume returns to batch
   32.
+- `2026-10-12 23:19 PDT`: launched the formal VLA resume in tmux session
+  `task26_dual_gtcond_223318`, window `vla`, from Orbax checkpoint step 1.
+  Restore completed in 25 seconds, batch 32 resumed successfully, and the
+  resume snapshot is `20261013T061917.162471Z_15181`.
+- `2026-10-12 23:21 PDT`: launched the formal Hand DiT resume in the same tmux
+  session, window `hand`, from `step_00000003.pt`. The resume snapshot is
+  `20261013T062113.061851Z_16860`. Early live checks showed VLA step-20 loss
+  0.1393 and gradient norm 0.4324; Hand step-200 loss was 0.245692. The two
+  jobs used approximately 51.5 GiB of 97.9 GiB VRAM together with no OOM.
+  Launch PIDs were 15181 for VLA and 16860 for Hand.
