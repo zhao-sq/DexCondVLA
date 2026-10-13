@@ -258,6 +258,7 @@ def main():
         "pin_memory": True,
         "drop_last": True,
         "persistent_workers": args.num_workers > 0,
+        "multiprocessing_context": "spawn" if args.num_workers > 0 else None,
     }
     training_loader = torch.utils.data.DataLoader(training_set, shuffle=True, generator=generator, **loader_kwargs)
     validation_loader = torch.utils.data.DataLoader(validation_set, shuffle=False, **loader_kwargs)
