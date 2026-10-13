@@ -221,7 +221,7 @@ def main():
         wandb_enabled=False,
     )
     checkpoint_root = (
-        pathlib.Path(tempfile.mkdtemp(prefix="openpi_joint_smoke_"))
+        pathlib.Path(tempfile.mkdtemp(prefix="openpi_joint_smoke_")) / "checkpoints"
         if args.smoke
         else pathlib.Path(config.checkpoint_dir)
     )
