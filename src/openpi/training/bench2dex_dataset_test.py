@@ -27,6 +27,12 @@ def _write_episode(path):
         meta = f.create_group("meta")
         meta.create_dataset("homing_start_sim_step", data=70)
         meta.create_dataset("instruction", data="place the cans on the tray")
+        labels = f.create_group("labels")
+        left_active = np.asarray([False, False, True, True, True, False, False, False])
+        right_active = np.asarray([False, False, False, False, True, True, False, False])
+        labels.create_dataset("left_gripper_active", data=left_active)
+        labels.create_dataset("right_gripper_active", data=right_active)
+        labels.create_dataset("gripper_active", data=np.logical_or(left_active, right_active))
         cameras = f.create_group("cameras")
         dtype = h5py.vlen_dtype(np.dtype("uint8"))
         for camera in bench2dex_dataset.DEFAULT_CAMERA_NAMES:
@@ -62,6 +68,17 @@ def test_bench2dex_processor_owns_source_adaptation(tmp_path):
 
     assert isinstance(dataset, bench2dex_dataset.Bench2DexHdf5Dataset)
     assert len(dataset) == 4
+
+
+def test_bench2dex_loads_gripper_activity_chunk(tmp_path):
+    episode = tmp_path / "episode_000000.hdf5"
+    _write_episode(episode)
+    dataset = bench2dex_dataset.Bench2DexHdf5Dataset([str(episode)], action_horizon=3, include_gripper_activity=True)
+
+    raw = dataset[0]
+
+    np.testing.assert_array_equal(raw["left_gripper_active_actions"], np.asarray([0.0, 1.0, 1.0]))
+    np.testing.assert_array_equal(raw["right_gripper_active_actions"], np.asarray([0.0, 0.0, 0.0]))
 
 
 def test_bench2dex_aligned_action_states(tmp_path):

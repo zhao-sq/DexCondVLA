@@ -108,6 +108,8 @@ class Bench2DexDatasetProcessor:
     camera_names: Sequence[str] = DEFAULT_CAMERA_NAMES
     prompt: str | None = None
     include_action_states: bool = False
+    include_gripper_activity: bool = False
+    source_action_dim: int | None = None
 
     def create_dataset(self, *, action_horizon: int, action_dim: int) -> Bench2DexHdf5Dataset:
         # Keep compatibility with the earlier bench2dex:/path spelling while
@@ -119,10 +121,11 @@ class Bench2DexDatasetProcessor:
         return Bench2DexHdf5Dataset(
             hdf5_paths=paths,
             action_horizon=action_horizon,
-            action_dim=action_dim,
+            action_dim=self.source_action_dim if self.source_action_dim is not None else action_dim,
             camera_names=self.camera_names,
             prompt=self.prompt,
             include_action_states=self.include_action_states,
+            include_gripper_activity=self.include_gripper_activity,
         )
 
 
@@ -138,6 +141,7 @@ class Bench2DexHdf5Dataset(torch.utils.data.Dataset):
         camera_names: Sequence[str] = DEFAULT_CAMERA_NAMES,
         prompt: str | None = None,
         include_action_states: bool = False,
+        include_gripper_activity: bool = False,
     ) -> None:
         if not hdf5_paths:
             raise ValueError("hdf5_paths is empty")
@@ -148,6 +152,7 @@ class Bench2DexHdf5Dataset(torch.utils.data.Dataset):
         self.action_dim = int(action_dim)
         self.camera_names = tuple(camera_names)
         self.include_action_states = bool(include_action_states)
+        self.include_gripper_activity = bool(include_gripper_activity)
         if self.camera_names != DEFAULT_CAMERA_NAMES:
             raise ValueError(f"Expected camera_names={DEFAULT_CAMERA_NAMES}, got {self.camera_names}")
 
@@ -194,6 +199,13 @@ class Bench2DexHdf5Dataset(torch.utils.data.Dataset):
                 raise ValueError(f"{path}: /{key} is not frame-aligned")
         if "meta/instruction" not in h5file:
             raise KeyError(f"{path}: missing /meta/instruction")
+        if self.include_gripper_activity:
+            for key in ("labels/left_gripper_active", "labels/right_gripper_active"):
+                if key not in h5file:
+                    raise KeyError(f"{path}: missing /{key}")
+                label = h5file[key]
+                if label.shape != (total,):
+                    raise ValueError(f"{path}: /{key} shape {label.shape} is not frame-aligned")
 
     def __len__(self) -> int:
         return int(self._cumulative_sizes[-1])
@@ -220,6 +232,14 @@ class Bench2DexHdf5Dataset(torch.utils.data.Dataset):
                 if self.include_action_states
                 else None
             )
+            side_activity_actions = (
+                {
+                    side: np.asarray(h5file[f"labels/{side}_gripper_active"][frame_indices], dtype=np.float32)
+                    for side in ("left", "right")
+                }
+                if self.include_gripper_activity
+                else None
+            )
             images = {
                 camera: _decode_jpeg(h5file[f"cameras/{camera}/rgb"][frame_index]) for camera in self.camera_names
             }
@@ -232,4 +252,7 @@ class Bench2DexHdf5Dataset(torch.utils.data.Dataset):
         }
         if action_states is not None:
             sample["action_states"] = action_states
+        if side_activity_actions is not None:
+            sample["left_gripper_active_actions"] = side_activity_actions["left"]
+            sample["right_gripper_active_actions"] = side_activity_actions["right"]
         return sample

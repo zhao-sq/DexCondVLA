@@ -1,4 +1,4 @@
-"""Render a Task26 camera video with green overlays on gripper-active frames."""
+"""Render Task26 video with green-left and red-right activity overlays."""
 
 from __future__ import annotations
 
@@ -105,8 +105,7 @@ def infer_gripper_intervals(episode: h5py.File) -> tuple[list[GripperInterval], 
         flexion_indices = [
             index
             for index, name in enumerate(names)
-            if name.startswith(prefix)
-            and ("_FE" in name or "_PIP" in name or "_DIP" in name or name.endswith("_IP"))
+            if name.startswith(prefix) and ("_FE" in name or "_PIP" in name or "_DIP" in name or name.endswith("_IP"))
         ]
         hand_targets = actions[:, flexion_indices]
         previous_release = 1
@@ -185,21 +184,30 @@ def main() -> None:
         if not writer.isOpened():
             raise RuntimeError(f"Failed to open video writer for {args.output_path}")
 
-        green = np.empty_like(first)
-        green[:] = (0, 255, 0)
+        overlay_colors = {
+            "LEFT": (0, 255, 0),
+            "RIGHT": (0, 0, 255),
+        }
         try:
             for frame_index in range(len(frames)):
                 frame = first.copy() if frame_index == 0 else _decode_jpeg(frames[frame_index])
-                active = next((interval for interval in intervals if interval.phase(frame_index)), None)
-                if active is not None:
-                    phase = active.phase(frame_index)
-                    frame = cv2.addWeighted(frame, 1.0 - args.alpha, green, args.alpha, 0.0)
-                    label = f"GRIPPER ACTIVE: {active.side} - {phase}"
-                    cv2.rectangle(frame, (10, 42), (525, 80), (0, 90, 0), -1)
+                active = [interval for interval in intervals if interval.phase(frame_index)]
+                for interval in active:
+                    color = overlay_colors[interval.side]
+                    overlay = np.empty_like(frame)
+                    overlay[:] = color
+                    frame = cv2.addWeighted(frame, 1.0 - args.alpha, overlay, args.alpha, 0.0)
+                for line_index, interval in enumerate(active):
+                    phase = interval.phase(frame_index)
+                    label = f"GRIPPER ACTIVE: {interval.side} - {phase}"
+                    color = overlay_colors[interval.side]
+                    top = 42 + line_index * 42
+                    bottom = top + 38
+                    cv2.rectangle(frame, (10, top), (525, bottom), color, -1)
                     cv2.putText(
                         frame,
                         label,
-                        (20, 69),
+                        (20, top + 27),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.75,
                         (255, 255, 255),
@@ -224,9 +232,7 @@ def main() -> None:
     print(f"fps={fps:g}")
     print(f"resolution={width}x{height}")
     for interval in intervals:
-        print(
-            f"interval={interval.side},{interval.close_start},{interval.open_start},{interval.open_complete}"
-        )
+        print(f"interval={interval.side},{interval.close_start},{interval.open_start},{interval.open_complete}")
     print(f"output={args.output_path}")
     if args.metadata_path is not None:
         args.metadata_path.parent.mkdir(parents=True, exist_ok=True)
