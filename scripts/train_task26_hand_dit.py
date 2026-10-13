@@ -33,6 +33,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--experiment-name", required=True)
     parser.add_argument("--output-dir", type=pathlib.Path, required=True)
     parser.add_argument(
+        "--storage-root",
+        type=pathlib.Path,
+        default=pathlib.Path("/mnt/ssd1/szhao/DexTool"),
+        help="Allowed root for training outputs; set this explicitly on remote hosts.",
+    )
+    parser.add_argument(
         "--dataset-dir",
         type=pathlib.Path,
         default=pathlib.Path("/mnt/ssd1/szhao/DexTool/bench2dex/task26/replay-generalization"),
@@ -79,7 +85,7 @@ def _validate_launch(args: argparse.Namespace) -> None:
     if min(args.steps, args.batch_size, args.log_every, args.save_every) <= 0:
         raise ValueError("--steps, --batch-size, --log-every, and --save-every must be positive")
     output = args.output_dir.expanduser().resolve()
-    storage_root = pathlib.Path("/mnt/ssd1/szhao/DexTool").resolve()
+    storage_root = args.storage_root.expanduser().resolve()
     if not output.is_relative_to(storage_root):
         raise ValueError(f"Training output must stay under {storage_root}, got {output}")
     registry_text = args.registry.read_text(encoding="utf-8")
