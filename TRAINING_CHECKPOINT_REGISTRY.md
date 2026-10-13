@@ -340,7 +340,7 @@ uses the larger `1e-4` learning rate.
 ## `task26_dual_expert_predcond_stopgrad_v1_20261012_233955`
 
 - Started: launch preparation began `2026-10-12 23:39:55 PDT`
-- Status: implementation and smoke validation in progress
+- Status: remote two-step joint smoke passed; formal launch pending
 - Purpose: same-batch joint training of the pretrained π₀.₅ Action Expert and
   scratch Hand DiT, with Hand conditioned on VLA predictions and a stopped
   Hand-to-VLA gradient.
@@ -393,3 +393,11 @@ the exact same samples, and a single VLA forward supplies both the VLA loss and
 the denoised condition. Crossing JAX to NumPy/Torch plus `.detach()` makes the
 gradient boundary explicit. The larger scratch Hand LR and smaller pretrained
 Action Expert LR remain intentionally separate.
+
+### Status history
+
+- `2026-10-12 23:47 PDT`: the remote two-step batch-1 joint GPU smoke passed
+  from official `pi05_base`. Step 1 produced VLA/Hand losses
+  `0.196499/1.341047`; step 2 produced `0.117124/1.317484`. The first XLA
+  compilation took about seven minutes, while the cached second coordinated
+  step ran at 4.896 steps/s. No training checkpoint was written by the smoke.
