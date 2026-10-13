@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures as futures
 import dataclasses
 import logging
+import os
 from typing import Protocol
 
 from etils import epath
@@ -15,6 +16,21 @@ from openpi.shared import array_typing as at
 import openpi.shared.normalize as _normalize
 import openpi.training.data_loader as _data_loader
 import openpi.training.utils as training_utils
+
+
+def _pytree_checkpoint_handler() -> ocp.PyTreeCheckpointHandler:
+    use_ocdbt = os.environ.get("OPENPI_CHECKPOINT_USE_OCDBT", "1").lower() not in {"0", "false", "no"}
+    save_concurrent_gb_text = os.environ.get("OPENPI_CHECKPOINT_SAVE_CONCURRENT_GB")
+    save_concurrent_gb = int(save_concurrent_gb_text) if save_concurrent_gb_text else None
+    logging.info(
+        "Checkpoint storage settings: use_ocdbt=%s, save_concurrent_gb=%s",
+        use_ocdbt,
+        save_concurrent_gb,
+    )
+    return ocp.PyTreeCheckpointHandler(
+        use_ocdbt=use_ocdbt,
+        save_concurrent_gb=save_concurrent_gb,
+    )
 
 
 def initialize_checkpoint_dir(
@@ -41,8 +57,8 @@ def initialize_checkpoint_dir(
         checkpoint_dir,
         item_handlers={
             "assets": CallbackHandler(),
-            "train_state": ocp.PyTreeCheckpointHandler(),
-            "params": ocp.PyTreeCheckpointHandler(),
+            "train_state": _pytree_checkpoint_handler(),
+            "params": _pytree_checkpoint_handler(),
         },
         options=ocp.CheckpointManagerOptions(
             max_to_keep=1,
