@@ -373,6 +373,8 @@ def main() -> None:
     if args.hand_dit_checkpoint:
         device = torch.device(args.hand_device)
         hand_model, normalization, hand_checkpoint = load_hand_dit_checkpoint(args.hand_dit_checkpoint, device=device)
+        adapter = hand_checkpoint.get("adapter_model")
+        checkpoint_metadata = hand_checkpoint.get("metadata", {})
         wrist_encoder = (
             Dinov3WristEncoder(
                 args.dinov3_repo,
@@ -388,6 +390,9 @@ def main() -> None:
             normalization,
             num_hand_steps=args.hand_flow_steps,
             device=device,
+            adapter=adapter,
+            vla_action_q01=checkpoint_metadata.get("vla_action_q01"),
+            vla_action_q99=checkpoint_metadata.get("vla_action_q99"),
         )
         metadata.update(policy.metadata)
         metadata["action_dim"] = 58

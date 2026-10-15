@@ -27,7 +27,7 @@ def test_predicted_condition_is_split_stacked_and_detached():
     assert condition.shape == (4, 3, 8)
     assert not condition.requires_grad
     torch.testing.assert_close(condition[:2, ..., -1], torch.ones(2, 3))
-    torch.testing.assert_close(condition[2:, ..., -1], torch.full((2, 3), 0.5))
+    torch.testing.assert_close(condition[2:, ..., -1], torch.ones(2, 3))
 
 
 def test_retention_keeps_only_latest_and_best(tmp_path: pathlib.Path):

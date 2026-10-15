@@ -33,9 +33,29 @@ def predicted_vla_actions_to_hand_condition(
     layout = TASK26_BIMANUAL_LAYOUT
     left_arm = hand_normalization.normalize(physical[..., :7], kind="action", indices=layout.left_arm)
     right_arm = hand_normalization.normalize(physical[..., 8:15], kind="action", indices=layout.right_arm)
-    left_active = physical[..., 7:8].clamp(0.0, 1.0)
-    right_active = physical[..., 15:16].clamp(0.0, 1.0)
+    left_active = (physical[..., 7:8] >= 0.5).to(physical.dtype)
+    right_active = (physical[..., 15:16] >= 0.5).to(physical.dtype)
     return torch.cat((torch.cat((left_arm, left_active), dim=-1), torch.cat((right_arm, right_active), dim=-1)), dim=0)
+
+
+def torch_vla_actions_to_hand_condition(
+    normalized_vla_actions: torch.Tensor,
+    *,
+    vla_action_q01: np.ndarray,
+    vla_action_q99: np.ndarray,
+    hand_normalization: DualExpertNormalization,
+) -> torch.Tensor:
+    """Differentiable joint conversion with deliberately hard 0/1 activity channels."""
+    values = normalized_vla_actions[..., :16]
+    low = torch.as_tensor(vla_action_q01[:16], device=values.device, dtype=values.dtype)
+    high = torch.as_tensor(vla_action_q99[:16], device=values.device, dtype=values.dtype)
+    physical = (values + 1.0) * 0.5 * (high - low + 1e-6) + low
+    layout = TASK26_BIMANUAL_LAYOUT
+    left_arm = hand_normalization.normalize(physical[..., :7], kind="action", indices=layout.left_arm)
+    right_arm = hand_normalization.normalize(physical[..., 8:15], kind="action", indices=layout.right_arm)
+    left_active = (physical[..., 7:8] >= 0.5).to(physical.dtype)
+    right_active = (physical[..., 15:16] >= 0.5).to(physical.dtype)
+    return torch.cat((torch.cat((left_arm, left_active), -1), torch.cat((right_arm, right_active), -1)), 0)
 
 
 def hand_targets_and_state(

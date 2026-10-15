@@ -201,6 +201,15 @@ class Pi0(_model.BaseModel):
         shares the exact noisy training forward pass, so joint downstream
         experts do not require an additional ODE sampling pass per step.
         """
+        loss, denoised_actions, _ = self.compute_loss_denoised_actions_and_vlm_features(
+            rng, observation, actions, train=train
+        )
+        return loss, denoised_actions
+
+    def compute_loss_denoised_actions_and_vlm_features(
+        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
+    ) -> tuple[at.Float[at.Array, "*b ah"], _model.Actions, at.Float[at.Array, "b emb"]]:
+        """Also return a masked mean of the frozen VLM's final-layer prefix tokens."""
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
@@ -225,7 +234,19 @@ class Pi0(_model.BaseModel):
 
         loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
         denoised_actions = x_t - time_expanded * v_t
-        return loss, denoised_actions
+        prefix_weights = prefix_mask[..., None].astype(prefix_out.dtype)
+        vlm_features = jnp.sum(prefix_out * prefix_weights, axis=1) / jnp.maximum(jnp.sum(prefix_weights, axis=1), 1)
+        return loss, denoised_actions, vlm_features
+
+    def extract_vlm_features(self, observation: _model.Observation) -> at.Float[at.Array, "b emb"]:
+        """Extract the masked pooled final VLM prefix feature for v2 inference."""
+        observation = _model.preprocess_observation(None, observation, train=False)
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        attention = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        (prefix_out, _), _ = self.PaliGemma.llm([prefix_tokens, None], mask=attention, positions=positions)
+        weights = prefix_mask[..., None].astype(prefix_out.dtype)
+        return jnp.sum(prefix_out * weights, axis=1) / jnp.maximum(jnp.sum(weights, axis=1), 1)
 
     @override
     def sample_actions(

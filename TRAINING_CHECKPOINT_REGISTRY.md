@@ -468,3 +468,73 @@ Action Expert LR remain intentionally separate.
   `inv=4/25`, and `inv_cov=0/25`. All 100 H.264 videos, both summaries, and the
   completion marker were copied to
   `/mnt/ssd1/szhao/DexTool/results/task26_dual_expert_predcond_stopgrad_bs64_v1_20261012_235520_step18000`.
+
+## `task26_dual_expert_vlm_adapter_hardact_v2_20261014_233437`
+
+- Started: launch preparation began `2026-10-14 23:34:37 PDT`
+- Status: running on GPU 1 in `tmux` session `task26_hand_dit_v2`
+- Purpose: Hand-DiT v2 joint training with hard side-specific activity,
+  frozen-VLM final-layer features, and a shared post-VLA action adapter.
+- Server: local P6000 server, GPU 1 (RTX PRO 6000 Blackwell 96 GB)
+- Repository/environment: `/home/shuqi/DexCondVLA`,
+  `/mnt/ssd1/szhao/DexTool/openpi_env`
+- Dataset: `/mnt/ssd1/szhao/DexTool/bench2dex/task26/replay-generalization`
+- Unified checkpoint directory:
+  `/mnt/ssd1/szhao/DexTool/ckp/pi05_bench2dex_task26_dual_expert_arm/task26_dual_expert_vlm_adapter_hardact_v2_20261014_233437/{step}`
+- Log:
+  `/mnt/ssd1/szhao/DexTool/openpi_logs/task26_dual_expert_vlm_adapter_hardact_v2_20261014_233437.log`
+- Device: physical GPU 1, exposed to the job as `cuda:0`
+
+### Setting
+
+- Same-batch joint optimization; batch 64; 20,000 steps; save and fixed
+  validation every 1,000 steps; retain only latest and validation-best.
+- VLA input/target: three RGB cameras, language, 14D arm state, and absolute
+  `(50,16)` `[left joint 7, left active, right joint 7, right active]` target,
+  padded internally to the official 32D π0.5 width.
+- Initialization: official `pi05_base`; VLM/SigLIP frozen; Action Expert and
+  action projections fine-tuned with the existing cosine schedule (peak
+  `5e-5`). Hand-DiT and the v2 adapter initialize from scratch.
+- VLM condition: masked mean of π0.5 VLM final-layer image/language prefix
+  tokens (2048D), passed to a trainable 512D shared adapter. The adapter emits
+  eight 512D Hand-DiT condition tokens and a zero-initialized residual over
+  the normalized 16D VLA action chunk.
+- Hand-DiT: shared independent-side six-layer width-512 model, eight heads;
+  conditions are corrected 8D side arm/activity chunks, frozen DINOv3 wrist
+  patches, current 22D hand state, side embedding, and shared VLM tokens.
+- Activity condition is always hard: physical activity `>=0.5` becomes `1`,
+  otherwise `0`, during both training and inference.
+- Gradient boundary: Hand loss backpropagates through VLM condition tokens and
+  arm-joint conditions into the shared post-VLA adapter, thereby changing the
+  deployed VLA action path. It does not cross the JAX/PyTorch boundary into
+  the frozen VLM or JAX Action Expert. The Action Expert continues to receive
+  its native flow-matching loss.
+- Optimizers: Hand-DiT AdamW LR `1e-4`; shared adapter AdamW LR `2e-5`;
+  adapter VLA reconstruction weight `1.0`; weight decay `1e-4`; gradient clip
+  `1.0`. DINOv3 remains frozen.
+
+### Special changes relative to v1
+
+The v1 soft predicted activity condition is replaced by hard 0/1 activation.
+VLM last-layer context is added as a new Hand-DiT modality. A shared residual
+adapter creates a real Hand-to-deployed-VLA gradient path while retaining the
+stable frozen-VLM boundary and the existing JAX π0.5 checkpoint ecosystem.
+
+### Status history
+
+- `2026-10-14 23:42 PDT`: two-step batch-1 smoke passed. Step 1 VLA/Hand/
+  adapter losses were `0.196979/1.341047/0.186675`; step 2 losses were
+  `0.116973/1.316891/0.124986`.
+- `2026-10-14 23:44 PDT`: two-step batch-64 smoke passed without OOM. Step 1
+  losses were `0.156778/1.404863/0.157210`; step 2 losses were
+  `0.142524/1.378855/0.142582`.
+- The smoke exposed that the local explicit OpenPI environment contained
+  PyTorch `2.7.1+cu126`, which cannot execute on Blackwell `sm_120`. It was
+  replaced in that same environment with official `torch 2.7.1+cu128` and
+  `torchvision 0.22.1+cu128`; system Python was not modified.
+- `2026-10-14 23:45 PDT`: formal batch-64 run launched in persistent `tmux`
+  session `task26_hand_dit_v2`, process PID 255795. Verified automatic code
+  snapshot pointer `20261015T064524.293542Z_255795` immediately after launch.
+  The first compile-inclusive 20-step window completed normally with VLA loss
+  `0.140918`, Hand loss `1.250343`, adapter VLA loss `0.135784`, and 0.109
+  steps/s. GPU 1 used about 87.8 GiB including the pre-existing 3.9 GiB job.

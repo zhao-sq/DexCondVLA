@@ -16,6 +16,8 @@ import torch
 from openpi.models_pytorch.dinov3_wrist_encoder import Dinov3WristEncoder
 from openpi.models_pytorch.hand_dit import HandDiT
 from openpi.models_pytorch.hand_dit import HandDiTConfig
+from openpi.models_pytorch.vlm_action_adapter import VLMActionAdapter
+from openpi.models_pytorch.vlm_action_adapter import VLMActionAdapterConfig
 from openpi.policies.dexterous_action_layout import TASK26_BIMANUAL_LAYOUT
 from openpi.policies.dexterous_action_layout import BimanualActionLayout
 
@@ -92,22 +94,24 @@ def save_hand_dit_checkpoint(
     step: int,
     optimizer_state: dict[str, Any] | None = None,
     metadata: Mapping[str, Any] | None = None,
+    adapter: VLMActionAdapter | None = None,
 ) -> None:
     path = pathlib.Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    torch.save(
-        {
-            "format_version": 1,
-            "model_config": dataclasses.asdict(model.config),
-            "model_state": model.state_dict(),
-            "normalization": normalization.to_dict(),
-            "step": int(step),
-            "optimizer_state": optimizer_state,
-            "metadata": dict(metadata or {}),
-        },
-        temporary,
-    )
+    payload = {
+        "format_version": 2 if adapter is not None else 1,
+        "model_config": dataclasses.asdict(model.config),
+        "model_state": model.state_dict(),
+        "normalization": normalization.to_dict(),
+        "step": int(step),
+        "optimizer_state": optimizer_state,
+        "metadata": dict(metadata or {}),
+    }
+    if adapter is not None:
+        payload["adapter_config"] = dataclasses.asdict(adapter.config)
+        payload["adapter_state"] = adapter.state_dict()
+    torch.save(payload, temporary)
     temporary.replace(path)
 
 
@@ -115,12 +119,16 @@ def load_hand_dit_checkpoint(
     path: pathlib.Path | str, *, device: torch.device | str
 ) -> tuple[HandDiT, DualExpertNormalization, dict[str, Any]]:
     checkpoint = torch.load(path, map_location=device, weights_only=False)
-    if checkpoint.get("format_version") != 1:
+    if checkpoint.get("format_version") not in (1, 2):
         raise ValueError(f"Unsupported hand checkpoint format: {checkpoint.get('format_version')}")
     model = HandDiT(HandDiTConfig(**checkpoint["model_config"]))
     model.load_state_dict(checkpoint["model_state"], strict=True)
     model.to(device).eval()
     normalization = DualExpertNormalization.from_dict(checkpoint["normalization"])
+    if checkpoint.get("format_version") == 2:
+        adapter = VLMActionAdapter(VLMActionAdapterConfig(**checkpoint["adapter_config"]))
+        adapter.load_state_dict(checkpoint["adapter_state"], strict=True)
+        checkpoint["adapter_model"] = adapter.to(device).eval()
     return model, normalization, checkpoint
 
 
@@ -172,6 +180,9 @@ class DualExpertHandPolicy(_base_policy.BasePolicy):
         right_wrist_key: str = "cam_wrist_right",
         num_hand_steps: int = 10,
         device: torch.device | str = "cuda",
+        adapter: VLMActionAdapter | None = None,
+        vla_action_q01: tuple[float, ...] | None = None,
+        vla_action_q99: tuple[float, ...] | None = None,
     ) -> None:
         self._vla_policy = vla_policy
         self._hand_model = hand_model.to(device).eval()
@@ -182,6 +193,11 @@ class DualExpertHandPolicy(_base_policy.BasePolicy):
         self._right_wrist_key = right_wrist_key
         self._num_hand_steps = num_hand_steps
         self._device = torch.device(device)
+        self._adapter = adapter.to(device).eval() if adapter is not None else None
+        self._vla_action_q01 = vla_action_q01
+        self._vla_action_q99 = vla_action_q99
+        if self._adapter is not None and (vla_action_q01 is None or vla_action_q99 is None):
+            raise ValueError("The v2 adapter requires VLA q01/q99 statistics")
         config = hand_model.config
         if (config.arm_dim, config.hand_dim, config.hand_state_dim) != (
             layout.arm_dim + 1,
@@ -226,6 +242,17 @@ class DualExpertHandPolicy(_base_policy.BasePolicy):
             else:
                 wrist_tokens = None
             vla_arm_actions = torch.as_tensor(vla_actions, device=self._device)
+            vlm_tokens = None
+            if self._adapter is not None:
+                feature = torch.as_tensor(self._vla_policy.infer_vlm_features(obs), device=self._device)[None]
+                low = torch.as_tensor(self._vla_action_q01, device=self._device)[:16]
+                high = torch.as_tensor(self._vla_action_q99, device=self._device)[:16]
+                normalized = 2.0 * (vla_arm_actions - low) / (high - low + 1e-6) - 1.0
+                corrected, vlm_tokens = self._adapter(normalized[None], feature)
+                vla_arm_actions = (corrected[0] + 1.0) * 0.5 * (high - low + 1e-6) + low
+                vla_arm_actions[..., 7] = (vla_arm_actions[..., 7] >= 0.5).to(vla_arm_actions.dtype)
+                vla_arm_actions[..., 15] = (vla_arm_actions[..., 15] >= 0.5).to(vla_arm_actions.dtype)
+                vlm_tokens = torch.cat((vlm_tokens, vlm_tokens), dim=0)
             full_state = torch.as_tensor(state, device=self._device)
             left_condition, right_condition = torch.split(vla_arm_actions, condition_dim, dim=-1)
             left_arm = left_condition[..., : self._layout.arm_dim]
@@ -277,12 +304,11 @@ class DualExpertHandPolicy(_base_policy.BasePolicy):
                 )
             )
             side_ids = torch.tensor((0, 1), device=self._device)
+            hand_sample_kwargs = {"num_steps": self._num_hand_steps}
+            if self._adapter is not None:
+                hand_sample_kwargs["vlm_tokens"] = vlm_tokens
             normalized_hands = self._hand_model.sample(
-                arm_actions,
-                wrist_tokens,
-                hand_state,
-                side_ids,
-                num_steps=self._num_hand_steps,
+                arm_actions, wrist_tokens, hand_state, side_ids, **hand_sample_kwargs
             )
             left_hand = self._normalization.unnormalize_actions(normalized_hands[0], self._layout.left_hand)
             right_hand = self._normalization.unnormalize_actions(normalized_hands[1], self._layout.right_hand)
@@ -300,7 +326,9 @@ class DualExpertHandPolicy(_base_policy.BasePolicy):
         base_metadata = dict(getattr(self._vla_policy, "metadata", {}))
         base_metadata.update(
             {
-                "hand_policy": "shared_independent_hand_dit_v1",
+                "hand_policy": "shared_independent_hand_dit_v2"
+                if self._adapter is not None
+                else "shared_independent_hand_dit_v1",
                 "hand_dim_per_side": self._layout.hand_dim,
                 "hand_action_horizon": self._hand_model.config.action_horizon,
                 "hand_flow_steps": self._num_hand_steps,

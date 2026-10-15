@@ -7,6 +7,8 @@ from torch import nn
 
 from openpi.models_pytorch.hand_dit import HandDiT
 from openpi.models_pytorch.hand_dit import HandDiTConfig
+from openpi.models_pytorch.vlm_action_adapter import VLMActionAdapter
+from openpi.models_pytorch.vlm_action_adapter import VLMActionAdapterConfig
 from openpi.policies.dexterous_action_layout import TASK26_BIMANUAL_LAYOUT
 from openpi.policies.dexterous_action_layout import BimanualActionLayout
 from openpi.policies.dual_expert_hand_policy import DualExpertHandPolicy
@@ -158,3 +160,30 @@ def test_hand_checkpoint_round_trip(tmp_path: Path) -> None:
     assert checkpoint["metadata"]["arm_condition_source"] == "ground_truth"
     for expected, actual in zip(model.parameters(), restored.parameters(), strict=True):
         torch.testing.assert_close(expected, actual)
+
+
+def test_v2_checkpoint_restores_adapter(tmp_path: Path) -> None:
+    model = HandDiT(
+        HandDiTConfig(
+            action_horizon=2,
+            arm_dim=1,
+            hand_dim=3,
+            hand_state_dim=3,
+            vision_feature_dim=8,
+            model_dim=16,
+            num_layers=1,
+            num_heads=4,
+            condition_on_vlm=True,
+            vlm_feature_dim=16,
+            detach_arm_condition=False,
+        )
+    )
+    adapter = VLMActionAdapter(VLMActionAdapterConfig(vlm_feature_dim=12, model_dim=16, action_dim=4, num_vlm_tokens=2))
+    checkpoint_path = tmp_path / "v2.pt"
+    save_hand_dit_checkpoint(checkpoint_path, model, _normalization(8), step=3, adapter=adapter)
+
+    restored, _, checkpoint = load_hand_dit_checkpoint(checkpoint_path, device="cpu")
+
+    assert checkpoint["format_version"] == 2
+    assert restored.config.condition_on_vlm
+    assert isinstance(checkpoint["adapter_model"], VLMActionAdapter)

@@ -33,6 +33,9 @@ class HandDiTConfig:
     condition_on_arm: bool = True
     condition_on_vision: bool = True
     condition_on_state: bool = True
+    condition_on_vlm: bool = False
+    vlm_feature_dim: int = 512
+    detach_arm_condition: bool = True
     bimanual_mode: Literal["independent_shared", "joint"] = "independent_shared"
 
     def __post_init__(self) -> None:
@@ -153,7 +156,13 @@ class HandConditionEncoder(nn.Module):
             nn.Linear(dimension, dimension),
         )
         self.arm_positions = nn.Parameter(torch.empty(config.action_horizon, dimension))
-        self.modality_embedding = nn.Parameter(torch.empty(3, dimension))
+        if config.condition_on_vlm:
+            self.vlm_norm = nn.LayerNorm(config.vlm_feature_dim)
+            self.vlm_projection = nn.Linear(config.vlm_feature_dim, dimension)
+        else:
+            self.vlm_norm = None
+            self.vlm_projection = None
+        self.modality_embedding = nn.Parameter(torch.empty(4 if config.condition_on_vlm else 3, dimension))
         self.side_embedding = nn.Parameter(torch.empty(2, dimension))
         nn.init.normal_(self.arm_positions, std=0.02)
         nn.init.normal_(self.modality_embedding, std=0.02)
@@ -170,6 +179,7 @@ class HandConditionEncoder(nn.Module):
         wrist_patch_tokens: torch.Tensor | None,
         hand_state: torch.Tensor,
         side_ids: torch.Tensor,
+        vlm_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = arm_actions.shape[0]
         if arm_actions.shape != (batch_size, self.config.action_horizon, self.config.arm_dim):
@@ -189,7 +199,8 @@ class HandConditionEncoder(nn.Module):
         side = self.side_embedding[side_ids.long()][:, None, :]
         condition_tokens: list[torch.Tensor] = []
         if self.config.condition_on_arm:
-            arm = self.arm_projection(arm_actions.detach())
+            arm_input = arm_actions.detach() if self.config.detach_arm_condition else arm_actions
+            arm = self.arm_projection(arm_input)
             arm = arm + self.arm_positions[None, :, :] + self.modality_embedding[0] + side
             condition_tokens.append(arm)
         if self.config.condition_on_vision:
@@ -200,6 +211,13 @@ class HandConditionEncoder(nn.Module):
         if self.config.condition_on_state:
             state = self.state_projection(hand_state)[:, None, :]
             condition_tokens.append(state + self.modality_embedding[2] + side)
+        if self.config.condition_on_vlm:
+            if vlm_tokens is None or vlm_tokens.ndim != 3 or vlm_tokens.shape[0] != batch_size:
+                raise ValueError("VLM conditioning requires tokens [B,N,F]")
+            assert self.vlm_norm is not None
+            assert self.vlm_projection is not None
+            vlm = self.vlm_projection(self.vlm_norm(vlm_tokens))
+            condition_tokens.append(vlm + self.modality_embedding[3] + side)
         return torch.cat(condition_tokens, dim=1)
 
 
@@ -236,12 +254,13 @@ class HandDiT(nn.Module):
         wrist_patch_tokens: torch.Tensor | None,
         hand_state: torch.Tensor,
         side_ids: torch.Tensor,
+        vlm_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = noisy_hand_actions.shape[0]
         expected = (batch_size, self.config.action_horizon, self.config.hand_dim)
         if noisy_hand_actions.shape != expected:
             raise ValueError(f"Expected noisy hand actions {expected}, got {noisy_hand_actions.shape}")
-        condition = self.condition_encoder(arm_actions, wrist_patch_tokens, hand_state, side_ids)
+        condition = self.condition_encoder(arm_actions, wrist_patch_tokens, hand_state, side_ids, vlm_tokens)
         time_embedding = self.time_mlp(sinusoidal_embedding(flow_time, self.config.model_dim))
         hand_tokens = self.action_projection(noisy_hand_actions) + self.action_positions[None, :, :]
         for block in self.blocks:
@@ -261,6 +280,7 @@ class HandDiT(nn.Module):
         side_valid: torch.Tensor | None = None,
         noise: torch.Tensor | None = None,
         flow_time: torch.Tensor | None = None,
+        vlm_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Linear conditional-flow-matching loss from noise at t=0 to data at t=1."""
         batch_size = target_hand_actions.shape[0]
@@ -275,7 +295,9 @@ class HandDiT(nn.Module):
         weight = flow_time[:, None, None]
         noisy_actions = (1.0 - weight) * noise + weight * target_hand_actions
         target_velocity = target_hand_actions - noise
-        predicted_velocity = self(noisy_actions, flow_time, arm_actions, wrist_patch_tokens, hand_state, side_ids)
+        predicted_velocity = self(
+            noisy_actions, flow_time, arm_actions, wrist_patch_tokens, hand_state, side_ids, vlm_tokens
+        )
         loss = torch.mean(torch.square(predicted_velocity - target_velocity), dim=(-2, -1))
         if side_valid is None:
             return loss.mean()
@@ -294,6 +316,7 @@ class HandDiT(nn.Module):
         *,
         num_steps: int = 10,
         noise: torch.Tensor | None = None,
+        vlm_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Euler-integrate the learned flow from Gaussian noise (t=0) to actions (t=1)."""
         if num_steps <= 0:
@@ -306,6 +329,6 @@ class HandDiT(nn.Module):
         step_size = 1.0 / num_steps
         for step in range(num_steps):
             flow_time = torch.full((batch_size,), step / num_steps, device=actions.device, dtype=actions.dtype)
-            velocity = self(actions, flow_time, arm_actions, wrist_patch_tokens, hand_state, side_ids)
+            velocity = self(actions, flow_time, arm_actions, wrist_patch_tokens, hand_state, side_ids, vlm_tokens)
             actions = actions + step_size * velocity
         return actions

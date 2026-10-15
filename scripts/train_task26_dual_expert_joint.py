@@ -25,6 +25,8 @@ from openpi.models import model as model_lib
 from openpi.models_pytorch.dinov3_wrist_encoder import Dinov3WristEncoder
 from openpi.models_pytorch.hand_dit import HandDiT
 from openpi.models_pytorch.hand_dit import HandDiTConfig
+from openpi.models_pytorch.vlm_action_adapter import VLMActionAdapter
+from openpi.models_pytorch.vlm_action_adapter import VLMActionAdapterConfig
 from openpi.policies.dexterous_action_layout import TASK26_BIMANUAL_LAYOUT
 from openpi.policies.dual_expert_hand_policy import DualExpertNormalization
 from openpi.policies.dual_expert_hand_policy import save_hand_dit_checkpoint
@@ -78,6 +80,9 @@ def _parse_args():
     parser.add_argument("--save-every", type=int, default=1_000)
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--hand-learning-rate", type=float, default=1e-4)
+    parser.add_argument("--adapter-learning-rate", type=float, default=2e-5)
+    parser.add_argument("--adapter-vla-loss-weight", type=float, default=1.0)
+    parser.add_argument("--vlm-conditioned-v2", action="store_true")
     parser.add_argument("--validation-fraction", type=float, default=0.02)
     parser.add_argument("--validation-batches", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
@@ -90,13 +95,15 @@ def _joint_train_step(config, rng, state, batch):
     model.train()
 
     def loss_fn(model, step_rng, observation, actions):
-        chunk_loss, predicted = model.compute_loss_and_denoised_actions(step_rng, observation, actions, train=True)
-        return jnp.mean(chunk_loss), predicted
+        chunk_loss, predicted, vlm_features = model.compute_loss_denoised_actions_and_vlm_features(
+            step_rng, observation, actions, train=True
+        )
+        return jnp.mean(chunk_loss), (predicted, vlm_features)
 
     step_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
     diff_state = nnx.DiffState(0, config.trainable_filter)
-    (loss, predicted), grads = nnx.value_and_grad(loss_fn, argnums=diff_state, has_aux=True)(
+    (loss, (predicted, vlm_features)), grads = nnx.value_and_grad(loss_fn, argnums=diff_state, has_aux=True)(
         model, step_rng, observation, actions
     )
     params = state.params.filter(config.trainable_filter)
@@ -113,14 +120,14 @@ def _joint_train_step(config, rng, state, batch):
                 new_params,
             ),
         )
-    return new_state, {"vla_loss": loss, "vla_grad_norm": optax.global_norm(grads)}, predicted
+    return new_state, {"vla_loss": loss, "vla_grad_norm": optax.global_norm(grads)}, predicted, vlm_features
 
 
 def _vla_validation_step(state, rng, batch):
     model = nnx.merge(state.model_def, state.params)
     model.eval()
-    loss, predicted = model.compute_loss_and_denoised_actions(rng, *batch, train=False)
-    return jnp.mean(loss), predicted
+    loss, predicted, vlm_features = model.compute_loss_denoised_actions_and_vlm_features(rng, *batch, train=False)
+    return jnp.mean(loss), predicted, vlm_features
 
 
 def _put_vla_batch(batch, data_sharding):
@@ -128,23 +135,49 @@ def _put_vla_batch(batch, data_sharding):
     return model_lib.Observation.from_dict(batch), batch["actions"]
 
 
-def _hand_batch(raw, predicted, vla_stats, hand_normalization, device, wrist_encoder):
+def _hand_batch(raw, predicted, vlm_features, vla_stats, hand_normalization, device, wrist_encoder, adapter=None):
     state = raw["state"].to(device, non_blocking=True)
     actions = raw["actions"].to(device, non_blocking=True)
-    arm = dual_expert_joint.predicted_vla_actions_to_hand_condition(
-        np.asarray(jax.device_get(predicted)),
-        vla_action_q01=vla_stats.q01,
-        vla_action_q99=vla_stats.q99,
-        hand_normalization=hand_normalization,
-        device=device,
+    predicted_torch = torch.as_tensor(
+        np.array(jax.device_get(predicted), dtype=np.float32, copy=True)[..., :16], device=device
     )
+    adapter_loss = torch.zeros((), device=device)
+    vlm_tokens = None
+    if adapter is None:
+        arm = dual_expert_joint.predicted_vla_actions_to_hand_condition(
+            np.asarray(jax.device_get(predicted)),
+            vla_action_q01=vla_stats.q01,
+            vla_action_q99=vla_stats.q99,
+            hand_normalization=hand_normalization,
+            device=device,
+        )
+    else:
+        features = torch.as_tensor(np.array(jax.device_get(vlm_features), dtype=np.float32, copy=True), device=device)
+        corrected, vlm_tokens = adapter(predicted_torch, features)
+        arm = dual_expert_joint.torch_vla_actions_to_hand_condition(
+            corrected,
+            vla_action_q01=vla_stats.q01,
+            vla_action_q99=vla_stats.q99,
+            hand_normalization=hand_normalization,
+        )
+        target_normalized = torch.as_tensor(raw["vla_actions"], device=device)[..., :16]
+        adapter_loss = torch.mean(torch.square(corrected - target_normalized))
+        vlm_tokens = torch.cat((vlm_tokens, vlm_tokens), dim=0)
     target, hand_state, side_ids = dual_expert_joint.hand_targets_and_state(state, actions, hand_normalization)
     wrist_images = torch.cat((raw["images"]["cam_wrist_left"], raw["images"]["cam_wrist_right"]), dim=0).to(
         device, non_blocking=True
     )
     with torch.inference_mode():
         wrist_tokens = wrist_encoder(wrist_images)
-    return arm.detach(), target, hand_state, side_ids, wrist_tokens
+    return (
+        arm if adapter is not None else arm.detach(),
+        target,
+        hand_state,
+        side_ids,
+        wrist_tokens,
+        vlm_tokens,
+        adapter_loss,
+    )
 
 
 def _validate(
@@ -158,9 +191,10 @@ def _validate(
     hand_normalization,
     device,
     wrist_encoder,
+    adapter=None,
 ):
     hand_model.eval()
-    vla_losses, hand_losses = [], []
+    vla_losses, hand_losses, adapter_losses = [], [], []
     validation_rng = jax.random.key(9_271)
     validation_step = jax.jit(
         _vla_validation_step,
@@ -172,9 +206,12 @@ def _validate(
             if index >= validation_batches:
                 break
             vla_batch = _put_vla_batch(transformed, data_sharding)
-            vla_loss, predicted = validation_step(state, jax.random.fold_in(validation_rng, index), vla_batch)
-            arm, target, hand_state, side_ids, wrist_tokens = _hand_batch(
-                raw, predicted, vla_stats, hand_normalization, device, wrist_encoder
+            vla_loss, predicted, vlm_features = validation_step(
+                state, jax.random.fold_in(validation_rng, index), vla_batch
+            )
+            raw["vla_actions"] = torch.as_tensor(np.asarray(transformed["actions"]))
+            arm, target, hand_state, side_ids, wrist_tokens, vlm_tokens, adapter_loss = _hand_batch(
+                raw, predicted, vlm_features, vla_stats, hand_normalization, device, wrist_encoder, adapter
             )
             hand_loss = hand_model.flow_matching_loss(
                 target,
@@ -184,11 +221,13 @@ def _validate(
                 side_ids,
                 noise=torch.zeros_like(target),
                 flow_time=torch.full((target.shape[0],), 0.5, device=device),
+                vlm_tokens=vlm_tokens,
             )
             vla_losses.append(float(jax.device_get(vla_loss)))
             hand_losses.append(float(hand_loss))
+            adapter_losses.append(float(adapter_loss))
     hand_model.train()
-    return float(np.mean(vla_losses)), float(np.mean(hand_losses))
+    return float(np.mean(vla_losses)), float(np.mean(hand_losses)), float(np.mean(adapter_losses))
 
 
 def main():
@@ -205,7 +244,11 @@ def main():
     print(f"Python interpreter: {sys.executable}", flush=True)
 
     base = config_lib.get_config("pi05_bench2dex_task26_dual_expert_arm")
-    data = dataclasses.replace(base.data, repo_id=str(args.dataset_dir.resolve()))
+    data = dataclasses.replace(
+        base.data,
+        repo_id=str(args.dataset_dir.resolve()),
+        assets=dataclasses.replace(base.data.assets, assets_dir=str(args.assets_base_dir.resolve())),
+    )
     config = dataclasses.replace(
         base,
         exp_name=args.experiment_name,
@@ -274,7 +317,7 @@ def main():
     train_step = jax.jit(
         functools.partial(_joint_train_step, config),
         in_shardings=(replicated_sharding, state_sharding, data_sharding),
-        out_shardings=(state_sharding, replicated_sharding, replicated_sharding),
+        out_shardings=(state_sharding, replicated_sharding, replicated_sharding, replicated_sharding),
         donate_argnums=(1,),
     )
 
@@ -287,9 +330,15 @@ def main():
             hand_dim=TASK26_BIMANUAL_LAYOUT.hand_dim,
             hand_state_dim=TASK26_BIMANUAL_LAYOUT.hand_dim,
             vision_feature_dim=Dinov3WristEncoder.feature_dim,
+            condition_on_vlm=args.vlm_conditioned_v2,
+            detach_arm_condition=not args.vlm_conditioned_v2,
         )
     ).to(device)
-    hand_optimizer = torch.optim.AdamW(hand_model.parameters(), lr=args.hand_learning_rate, weight_decay=1e-4)
+    adapter = VLMActionAdapter(VLMActionAdapterConfig()).to(device) if args.vlm_conditioned_v2 else None
+    parameter_groups = [{"params": hand_model.parameters(), "lr": args.hand_learning_rate}]
+    if adapter is not None:
+        parameter_groups.append({"params": adapter.parameters(), "lr": args.adapter_learning_rate})
+    hand_optimizer = torch.optim.AdamW(parameter_groups, weight_decay=1e-4)
     wrist_encoder = Dinov3WristEncoder(args.dinov3_repo, args.dinov3_checkpoint).to(device).eval()
     for parameter in wrist_encoder.parameters():
         parameter.requires_grad = False
@@ -298,15 +347,19 @@ def main():
         "experiment_name": args.experiment_name,
         "training": "joint_same_batch",
         "arm_condition_source": "vla_single_forward_denoised_prediction",
-        "hand_to_vla_gradient": "stopped",
+        "hand_to_vla_gradient": "shared_post_vla_adapter" if adapter is not None else "stopped",
+        "activity_condition": "hard_0_or_1",
+        "vlm_final_layer_condition": bool(adapter is not None),
         "vlm_frozen": True,
         "dinov3_frozen": True,
         "vla_action_expert_initialization": "pi05_base",
         "hand_initialization": "scratch",
         "hand_learning_rate": args.hand_learning_rate,
+        "vla_action_q01": np.asarray(vla_stats.q01).tolist(),
+        "vla_action_q99": np.asarray(vla_stats.q99).tolist(),
     }
 
-    running_vla = running_hand = 0.0
+    running_vla = running_hand = running_adapter = 0.0
     last_log = time.monotonic()
     best_step, best_score = 0, float("inf")
     hand_model.train()
@@ -314,30 +367,39 @@ def main():
         transformed, raw = next(training_batches)
         vla_batch = _put_vla_batch(transformed, data_sharding)
         with sharding.set_mesh(mesh):
-            train_state, info, predicted = train_step(train_rng, train_state, vla_batch)
-        arm, target, hand_state, side_ids, wrist_tokens = _hand_batch(
-            raw, predicted, vla_stats, hand_normalization, device, wrist_encoder
+            train_state, info, predicted, vlm_features = train_step(train_rng, train_state, vla_batch)
+        raw["vla_actions"] = torch.as_tensor(np.asarray(transformed["actions"]))
+        arm, target, hand_state, side_ids, wrist_tokens, vlm_tokens, adapter_loss = _hand_batch(
+            raw, predicted, vlm_features, vla_stats, hand_normalization, device, wrist_encoder, adapter
         )
         hand_optimizer.zero_grad(set_to_none=True)
-        hand_loss = hand_model.flow_matching_loss(target, arm, wrist_tokens, hand_state, side_ids)
-        hand_loss.backward()
-        torch.nn.utils.clip_grad_norm_(hand_model.parameters(), 1.0)
+        hand_loss = hand_model.flow_matching_loss(
+            target, arm, wrist_tokens, hand_state, side_ids, vlm_tokens=vlm_tokens
+        )
+        torch_loss = hand_loss + args.adapter_vla_loss_weight * adapter_loss
+        torch_loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            list(hand_model.parameters()) + ([] if adapter is None else list(adapter.parameters())), 1.0
+        )
         hand_optimizer.step()
         running_vla += float(jax.device_get(info["vla_loss"]))
         running_hand += float(hand_loss.detach())
+        running_adapter += float(adapter_loss.detach())
         completed = step + 1
         if completed % args.log_every == 0:
             elapsed = time.monotonic() - last_log
             print(
                 f"step={completed} vla_loss={running_vla / args.log_every:.6f} "
-                f"hand_loss={running_hand / args.log_every:.6f} steps_per_second={args.log_every / elapsed:.3f}",
+                f"hand_loss={running_hand / args.log_every:.6f} "
+                f"adapter_vla_loss={running_adapter / args.log_every:.6f} "
+                f"steps_per_second={args.log_every / elapsed:.3f}",
                 flush=True,
             )
-            running_vla = running_hand = 0.0
+            running_vla = running_hand = running_adapter = 0.0
             last_log = time.monotonic()
         should_save = completed % args.save_every == 0 or completed == args.steps
         if should_save and not args.smoke:
-            val_vla, val_hand = _validate(
+            val_vla, val_hand, val_adapter = _validate(
                 train_state,
                 hand_model,
                 validation_loader,
@@ -348,8 +410,9 @@ def main():
                 hand_normalization,
                 device,
                 wrist_encoder,
+                adapter,
             )
-            score = val_vla + val_hand
+            score = val_vla + val_hand + args.adapter_vla_loss_weight * val_adapter
             if score < best_score:
                 best_score, best_step = score, completed
             checkpoints.save_state(
@@ -364,9 +427,18 @@ def main():
                 step=completed,
                 optimizer_state=hand_optimizer.state_dict(),
                 metadata=metadata,
+                adapter=adapter,
             )
             (step_dir / "joint_metrics.json").write_text(
-                json.dumps({"vla_validation_loss": val_vla, "hand_validation_loss": val_hand, "score": score}, indent=2)
+                json.dumps(
+                    {
+                        "vla_validation_loss": val_vla,
+                        "hand_validation_loss": val_hand,
+                        "adapter_vla_validation_loss": val_adapter,
+                        "score": score,
+                    },
+                    indent=2,
+                )
                 + "\n",
                 encoding="utf-8",
             )
