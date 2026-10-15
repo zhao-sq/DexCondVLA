@@ -1,6 +1,9 @@
 # Arm-Conditioned Hand DiT: Policy Design Specification
 
-**Status:** Updated implementation proposal (v0.2)
+**Status:** Historical design specification. The first implemented and
+evaluated method is frozen as **Hand-DiT v1** and documented exactly in
+`dual_expert_hand_dit_implementation.md`. Future v2 work must preserve that
+version boundary rather than silently changing the v1 result.
 **Goal:** Efficient dexterous manipulation finetuning by separating arm and hand action modeling while preserving fine-grained local visual information.
 
 ## 1. Motivation and Scope

@@ -1,4 +1,13 @@
-# Task26 Dual-Expert Hand DiT: v1 Implementation
+# Task26 Dual-Expert Hand DiT v1: Implemented Method
+
+> **Version status:** This document is the authoritative description of the
+> first implemented and evaluated method, **Hand-DiT v1**. It describes the
+> code and checkpoint exactly as evaluated at step 18,000; later fixes or v2
+> changes must not be presented as part of this result.
+
+The evaluated v1 variant is named **predicted-condition, stop-gradient,
+independent-shared Hand-DiT**. It is intentionally a first-version experiment,
+not the final recommended architecture.
 
 This implementation keeps the official π₀.₅ network and checkpoint at their
 pretrained 32-dimensional action width. At the robot-facing boundary, the VLA
@@ -18,7 +27,8 @@ channels into Task26's native interleaved ordering.
 - Bimanual behavior: left and right are stacked on the batch dimension and
   predicted independently with shared weights and learned side embeddings.
 - Arm condition: one aligned eight-value arm/activity token per future timestep
-  (seven joints plus the predicted 0/1 activity flag).
+  (seven joints plus the predicted activity value). The supervision label is
+  binary; the exact v1 train/inference conversion is recorded below.
 - Vision condition: frozen DINOv3 ViT-B/16 patch tokens from the corresponding
   wrist camera; CLS and four storage tokens are excluded.
 - Hand state: the current 22 joint positions for the corresponding hand.
@@ -29,9 +39,108 @@ channels into Task26's native interleaved ordering.
 - Gradient boundary: the arm condition is detached inside the condition
   encoder. DINOv3 is permanently frozen.
 
-Stage-1 Hand DiT training uses ground-truth arm chunks. Deployment uses the arm
-VLA's predicted chunk. This intentional mismatch must be measured before a
-deployable result is claimed.
+The formal v1 run does **not** use ground-truth arm chunks as Hand-DiT
+conditions. The VLA and Hand-DiT are trained in one coordinated loop on the
+same batch. Hand-DiT receives the VLA's single-forward denoised arm/activity
+prediction, copied across the JAX-to-PyTorch boundary and detached. Therefore
+the hand loss trains Hand-DiT only; the VLA action expert is trained by its own
+flow-matching loss. The separate Stage-1 entry point with ground-truth arm
+conditions remains available only as an ablation.
+
+## Exact v1 method
+
+### Arm/activity expert
+
+- Backbone: official pi0.5 model initialized from `pi05_base`.
+- Frozen: SigLIP and the Gemma/VLM pipeline.
+- Trainable: the pi0.5 action expert and action projections selected by the
+  `pi05_bench2dex_task26_dual_expert_arm` freeze filter.
+- Network action width: the official 32D width, preserving direct checkpoint
+  compatibility.
+- Physical interface: a 14D current arm state and a 50-step, 16D action chunk
+  `[left_arm_7, left_active, right_arm_7, right_active]`.
+- The two activity targets are the independently annotated binary left/right
+  labels. They condition the hand model and are not robot joints.
+
+### Hand expert
+
+- One Hand-DiT is shared by both sides; left and right examples are stacked on
+  the batch axis and decoded independently with learned side embeddings.
+- Each side outputs a `(50, 22)` absolute hand-joint chunk.
+- Conditions per side are the predicted `(50, 8)` arm/activity chunk, frozen
+  DINOv3 ViT-B/16 wrist patch tokens pooled to at most 64 tokens, and the
+  current 22D hand state.
+- Architecture: width 512, six DiT blocks, eight attention heads, self-attention
+  over hand-action time tokens, and cross-attention to the condition memory.
+- Objective: linear conditional flow matching from Gaussian noise to the hand
+  target. Runtime uses ten Euler integration steps.
+- DINOv3 is frozen and Hand-DiT is initialized from scratch.
+
+### Joint optimization
+
+- A single dataset batch supervises both experts.
+- VLA optimizer: the config's AdamW/cosine schedule, peak LR `5e-5`, 1,000-step
+  warmup, final LR `5e-6`, EMA `0.99`, gradient clip `1.0`.
+- Hand optimizer: AdamW, LR `1e-4`, weight decay `1e-4`, gradient clip `1.0`.
+- Formal batch size: 64; planned length: 20,000 steps.
+- Hand-to-VLA gradient is stopped. The VLA never receives the hand loss.
+- Validation checkpoint ranking is the unweighted sum of fixed-batch VLA and
+  Hand-DiT flow losses.
+
+### Runtime composition
+
+The VLA first samples its 16D physical chunk. Hand-DiT then samples both 22D
+hand chunks from their side-specific conditions. `BimanualActionLayout`
+scatters the 14 arm joints and 44 hand joints back into Task26's interleaved
+58D action order. The activity values remain internal conditions.
+
+## Evaluated v1 checkpoint and result
+
+- Experiment: `task26_dual_expert_predcond_stopgrad_bs64_v1_20261012_235520`.
+- Selected checkpoint: step 18,000. Step 19,000 was incomplete after its Orbax
+  save stalled and was not used.
+- Fixed validation losses at step 18,000: VLA `0.0014852549647912383`, Hand-DiT
+  `0.007435241714119911`, combined `0.00892049667891115`.
+- Bench2Dex Task26 evaluation: 100 rollouts, 25 in each of `none`, `cov`, `inv`,
+  and `inv_cov`.
+- Official success: `0/100` (`0%`).
+- Relaxed success without per-object upright checks: `10/100` (`10%`), broken
+  down as `none=4/25`, `cov=2/25`, `inv=4/25`, `inv_cov=0/25`.
+- The corresponding full-action baseline scored `13/100` (`13%`) under the
+  same relaxed criterion.
+
+## Known v1 behavior retained for reproducibility
+
+These points describe the evaluated implementation; they are candidates for a
+later version, not silent changes to v1:
+
+1. During joint training, predicted activity conditions are unnormalized and
+   clamped to `[0, 1]` but remain continuous. During deployed inference,
+   `Bench2DexArmOutputs` thresholds activity at `0.5` before Hand-DiT sees it.
+2. Training conditions use the VLA's single-forward clean-action estimate from
+   its noisy training forward pass. Deployment conditions use the VLA's full
+   iterative flow sample.
+3. The RPC reset path resets the JAX VLA RNG but does not separately reset the
+   PyTorch RNG used to initialize Hand-DiT sampling noise.
+4. Left and right hands have no cross-hand attention, and the hand loss cannot
+   correct the VLA arm plan because of the stop-gradient boundary.
+5. Hand-DiT has no direct language, overhead-camera, or frozen VLM-token
+   condition in v1.
+
+## v1 source map
+
+- `src/openpi/models_pytorch/hand_dit.py`: Hand-DiT architecture, loss, sampler.
+- `src/openpi/models_pytorch/dinov3_wrist_encoder.py`: frozen wrist encoder.
+- `src/openpi/policies/dexterous_action_layout.py`: exact Task26 58D layout.
+- `src/openpi/policies/dual_expert_hand_policy.py`: composed runtime policy.
+- `src/openpi/policies/bench2dex_policy.py`: 16D arm/activity transforms.
+- `src/openpi/training/dual_expert_joint.py`: joint-training conversions and
+  stop-gradient boundary.
+- `scripts/train_task26_dual_expert_joint.py`: formal joint trainer.
+- `scripts/serve_bench2dex_rpc_policy.py`: evaluation policy server.
+- `scripts/run_task26_dual_expert_joint_remote.sh`: formal v1 launch settings.
+- `scripts/queue_task26_dual_expert_full_remote_evaluation.sh`: complete remote
+  evaluation/export/rescore pipeline.
 
 ## VLA supervision contract
 

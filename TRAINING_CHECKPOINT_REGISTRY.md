@@ -410,7 +410,8 @@ Action Expert LR remain intentionally separate.
 ## `task26_dual_expert_predcond_stopgrad_bs64_v1_20261012_235520`
 
 - Started: launch preparation began `2026-10-12 23:55:20 PDT`
-- Status: formal 20,000-step batch-64 training running
+- Status: stopped by user after the step-19,000 checkpoint save stalled;
+  step 18,000 selected for and completed full evaluation
 - Purpose: same architecture and optimization as
   `task26_dual_expert_predcond_stopgrad_v1_20261012_233955`, testing and, if it
   fits, formally using the original config batch size 64.
@@ -450,3 +451,20 @@ Action Expert LR remain intentionally separate.
   0.251 steps/s. VLA loss averaged 0.117249 and Hand loss 0.788547 in the
   latter window. Estimated completion is about 22--23 hours after launch,
   including validation/checkpoint overhead.
+- `2026-10-14 04:21 PDT`: training reached step 19,000 and entered Orbax
+  checkpoint saving, but the save remained in
+  `19000.orbax-checkpoint-tmp-*`. TensorStore worker threads were later
+  confirmed in uninterruptible Linux memory-management waits while GPU
+  utilization was zero. The partial step 19,000 checkpoint is not loadable.
+- `2026-10-14 11:36 PDT`: at the user's direction, stopped the stalled formal
+  trainer and did not resume training. W&B was left running. The latest and
+  validation-best complete checkpoint are both step 18,000. Its fixed
+  validation VLA/Hand losses are `0.0014852549647912383` and
+  `0.007435241714119911` (combined score `0.00892049667891115`). Step 18,000
+  was selected for the full 100-rollout remote evaluation and result return.
+- `2026-10-15 PDT`: completed the 100-rollout Task26 evaluation for the
+  step-18,000 checkpoint. Official success was `0/100`. The relaxed score that
+  omits per-object upright checks was `10/100`: `none=4/25`, `cov=2/25`,
+  `inv=4/25`, and `inv_cov=0/25`. All 100 H.264 videos, both summaries, and the
+  completion marker were copied to
+  `/mnt/ssd1/szhao/DexTool/results/task26_dual_expert_predcond_stopgrad_bs64_v1_20261012_235520_step18000`.
