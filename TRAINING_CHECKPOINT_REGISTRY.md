@@ -582,3 +582,39 @@ stable frozen-VLM boundary and the existing JAX π0.5 checkpoint ecosystem.
 - Formal restart therefore uses batch 32 and XLA memory fraction 0.35. This is
   a resource-driven batch-size change only; all model and optimizer settings
   remain unchanged.
+
+## `task26_dual_expert_vlm_adapter_hardact_v2r2_20261015_153548`
+
+- Started: launch preparation began `2026-10-15 15:35:48 PDT`
+- Status: environment setup and remote validation smoke in progress
+- Purpose: run the corrected v2 joint fine-tune on the dedicated Vast GPU,
+  including automatic validation immediately after optimizer step 1.
+- Server/device: Vast instance `175.155.64.160:19037`, NVIDIA RTX 6000D
+  (85,651 MiB), dedicated GPU 0
+- Repository/environment: `/workspace/DexCondVLA`,
+  `/workspace/DexCondVLA/.venv`
+- Dataset: `/workspace/DexTool/bench2dex/task26/replay-generalization`
+- Unified checkpoint directory:
+  `/workspace/DexTool/ckp/pi05_bench2dex_task26_dual_expert_arm/task26_dual_expert_vlm_adapter_hardact_v2r2_20261015_153548/{step}`
+- Log:
+  `/workspace/DexTool/openpi_logs/task26_dual_expert_vlm_adapter_hardact_v2r2_20261015_153548.log`
+- Selected checkpoint: not selected yet
+
+### Setting and changes
+
+- Initialize the OpenPI action expert from the official `pi05_base` weights;
+  keep the VLM/SigLIP backbone frozen and train its action expert/projections.
+- Train the scratch Hand DiT jointly with frozen DINOv3 wrist-image features.
+  Enable the v2 VLM feature adapter and hard activity conditioning, with Hand
+  learning rate `1e-4`, adapter learning rate `2e-5`, and adapter VLA loss
+  weight `1.0`.
+- Use batch size 32, 20,000 optimizer steps, four data workers, logging every
+  20 steps, validation fraction `0.02`, two validation batches, and seed 42.
+- Run validation after step 1 without saving. Thereafter validate/save every
+  1,000 steps and retain only the current latest checkpoint and the checkpoint
+  with the best validation metric.
+- Use `XLA_PYTHON_CLIENT_MEM_FRACTION=0.55`, CUDA 12.8 PyTorch, the staged
+  Task26 normalization assets, DINOv3 commit
+  `6876159a11b4df116f30f667f8c9888617df0751`, and the verified DINOv3
+  checkpoint SHA-256
+  `73cec8be7427c8655ceced13ce62f6e20a1fa90d1b4d4a550df17a1144081a7c`.
