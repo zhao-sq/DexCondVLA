@@ -87,6 +87,11 @@ def _parse_args():
     parser.add_argument("--validation-batches", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--smoke", action="store_true", help="Run the requested steps without writing checkpoints")
+    parser.add_argument(
+        "--validate-smoke",
+        action="store_true",
+        help="Deprecated compatibility flag; validation now always runs after step 1 without saving a checkpoint",
+    )
     return parser.parse_args()
 
 
@@ -199,7 +204,7 @@ def _validate(
     validation_step = jax.jit(
         _vla_validation_step,
         in_shardings=(None, replicated_sharding, data_sharding),
-        out_shardings=(replicated_sharding, replicated_sharding),
+        out_shardings=(replicated_sharding, replicated_sharding, replicated_sharding),
     )
     with torch.no_grad():
         for index, (transformed, raw) in enumerate(validation_loader):
@@ -234,6 +239,8 @@ def main():
     args = _parse_args()
     if not 0.0 < args.validation_fraction < 0.5:
         raise ValueError("--validation-fraction must be in (0, 0.5)")
+    if args.validate_smoke and not args.smoke:
+        raise ValueError("--validate-smoke requires --smoke")
     registry = args.registry.read_text(encoding="utf-8")
     if f"## `{args.experiment_name}`" not in registry:
         raise RuntimeError("Register the unique experiment name before launch")
@@ -397,8 +404,13 @@ def main():
             )
             running_vla = running_hand = running_adapter = 0.0
             last_log = time.monotonic()
-        should_save = completed % args.save_every == 0 or completed == args.steps
-        if should_save and not args.smoke:
+        # Exercise the complete validation path immediately after the first
+        # optimizer step. This is deliberately validation-only: even when
+        # save_every=1 or steps=1, step 1 must not write a checkpoint.
+        validation_action = dual_expert_joint.validation_action(
+            completed, total_steps=args.steps, save_every=args.save_every, smoke=args.smoke
+        )
+        if validation_action is not None:
             val_vla, val_hand, val_adapter = _validate(
                 train_state,
                 hand_model,
@@ -412,6 +424,13 @@ def main():
                 wrist_encoder,
                 adapter,
             )
+            if validation_action == "validate_only":
+                print(
+                    f"validation_step=1 vla_loss={val_vla:.6f} hand_loss={val_hand:.6f} "
+                    f"adapter_vla_loss={val_adapter:.6f} checkpoint_saved=false",
+                    flush=True,
+                )
+                continue
             score = val_vla + val_hand + args.adapter_vla_loss_weight * val_adapter
             if score < best_score:
                 best_score, best_step = score, completed

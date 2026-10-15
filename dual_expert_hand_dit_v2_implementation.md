@@ -107,6 +107,29 @@ batch-64 losses were:
 The required automatic code snapshot was verified at
 `code_snapshots/LATEST` immediately after formal launch.
 
+### Corrected restart
+
+The initial formal run reached step 1,000 but its first validation exposed a
+two-versus-three-output `out_shardings` declaration left from v1. It exited
+before saving a numeric checkpoint. The declaration was corrected and a new
+validation smoke mode was added so this path is exercised before long runs.
+The validation smoke passed.
+
+The joint entry point now also runs validation unconditionally immediately
+after the first optimizer step for every launch. This first validation only
+prints the VLA, Hand-DiT, and adapter losses and never writes a checkpoint,
+including when `save_every=1` or the run contains only one step. Later
+validation and checkpoint retention continue to follow the configured save
+interval. The older `--validate-smoke` argument remains accepted for launch
+command compatibility but is no longer needed.
+
+The corrected restart is
+`task26_dual_expert_vlm_adapter_hardact_v2r1_20261015_121347`. GPU 1 had since
+become shared with unrelated jobs occupying about 50 GiB, so batch 64 no
+longer fit. A batch-32 smoke passed under XLA memory fraction 0.35; the restart
+uses batch 32 with otherwise identical architecture, losses, and optimizer
+settings.
+
 ## Files changed
 
 - `src/openpi/models/pi0.py`: expose pooled final-layer VLM features for joint

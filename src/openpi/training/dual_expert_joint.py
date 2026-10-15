@@ -12,6 +12,17 @@ from openpi.policies.dexterous_action_layout import TASK26_BIMANUAL_LAYOUT
 from openpi.policies.dual_expert_hand_policy import DualExpertNormalization
 
 
+def validation_action(
+    completed_step: int, *, total_steps: int, save_every: int, smoke: bool
+) -> str | None:
+    """Return whether to validate only or validate and save at this step."""
+    if completed_step == 1:
+        return "validate_only"
+    if not smoke and (completed_step % save_every == 0 or completed_step == total_steps):
+        return "validate_and_save"
+    return None
+
+
 def predicted_vla_actions_to_hand_condition(
     normalized_vla_actions: np.ndarray,
     *,

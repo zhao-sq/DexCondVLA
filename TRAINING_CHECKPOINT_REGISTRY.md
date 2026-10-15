@@ -538,3 +538,47 @@ stable frozen-VLM boundary and the existing JAX π0.5 checkpoint ecosystem.
   The first compile-inclusive 20-step window completed normally with VLA loss
   `0.140918`, Hand loss `1.250343`, adapter VLA loss `0.135784`, and 0.109
   steps/s. GPU 1 used about 87.8 GiB including the pre-existing 3.9 GiB job.
+- `2026-10-15 01:38 PDT`: the run completed training step 1,000, then exited
+  before validation/checkpoint saving because the validation JIT returned
+  three tensors while its `out_shardings` still declared the v1 two-tensor
+  structure. No numeric checkpoint was produced; the last training-window
+  losses were VLA `0.015132`, Hand `0.067503`, and adapter VLA `0.011909`.
+
+## `task26_dual_expert_vlm_adapter_hardact_v2r1_20261015_121347`
+
+- Started: launch preparation began `2026-10-15 12:13:47 PDT`
+- Status: launch pending after successful validation and batch-size smoke tests
+- Purpose: corrected restart of
+  `task26_dual_expert_vlm_adapter_hardact_v2_20261014_233437`.
+- Server/device: local P6000 server, physical GPU 1
+- Repository/environment: `/home/shuqi/DexCondVLA`,
+  `/mnt/ssd1/szhao/DexTool/openpi_env`
+- Dataset: `/mnt/ssd1/szhao/DexTool/bench2dex/task26/replay-generalization`
+- Unified checkpoint directory:
+  `/mnt/ssd1/szhao/DexTool/ckp/pi05_bench2dex_task26_dual_expert_arm/task26_dual_expert_vlm_adapter_hardact_v2r1_20261015_121347/{step}`
+- Log:
+  `/mnt/ssd1/szhao/DexTool/openpi_logs/task26_dual_expert_vlm_adapter_hardact_v2r1_20261015_121347.log`
+- Selected checkpoint: not selected yet
+
+### Setting and changes
+
+- Architecture, losses, initialization, learning rates, hard activity, VLM
+  feature adapter, 20,000-step schedule, 1,000-step save interval, and
+  latest-plus-best retention are unchanged from the failed v2 launch.
+- Validation JIT `out_shardings` is corrected from two outputs to the actual
+  three outputs: VLA loss, denoised VLA actions, and pooled VLM features.
+- The trainer now exercises validation unconditionally after its first
+  optimizer step without writing a checkpoint. The compatibility
+  `--validate-smoke` flag remains accepted but is no longer required. A
+  corrected batch-1 validation smoke first passed with VLA/Hand/adapter losses
+  `0.127874/0.333293/0.011894`. After making first-step validation automatic,
+  a two-step batch-1 smoke passed again: step-1 validation losses were
+  `0.127475/0.333293/0.011858`, step 2 completed normally, and the temporary
+  checkpoint directory contained no numeric checkpoint.
+- GPU 1 is now shared with unrelated jobs using about 50 GiB. Batch 64 with
+  `XLA_PYTHON_CLIENT_MEM_FRACTION=0.35` correctly failed the pre-launch smoke
+  due to insufficient memory; batch 32 passed two steps with losses
+  `0.155555/1.393461/0.153025` and `0.140901/1.407393/0.143260`.
+- Formal restart therefore uses batch 32 and XLA memory fraction 0.35. This is
+  a resource-driven batch-size change only; all model and optimizer settings
+  remain unchanged.

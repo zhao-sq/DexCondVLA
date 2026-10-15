@@ -6,6 +6,19 @@ import torch
 from openpi.policies.dual_expert_hand_policy import DualExpertNormalization
 from openpi.training.dual_expert_joint import predicted_vla_actions_to_hand_condition
 from openpi.training.dual_expert_joint import retain_latest_and_best
+from openpi.training.dual_expert_joint import validation_action
+
+
+def test_validation_action_always_validates_step_one_without_saving():
+    assert validation_action(1, total_steps=1, save_every=1, smoke=False) == "validate_only"
+    assert validation_action(1, total_steps=20_000, save_every=1_000, smoke=True) == "validate_only"
+
+
+def test_validation_action_preserves_later_checkpoint_schedule():
+    assert validation_action(2, total_steps=20_000, save_every=1_000, smoke=False) is None
+    assert validation_action(1_000, total_steps=20_000, save_every=1_000, smoke=False) == "validate_and_save"
+    assert validation_action(20_000, total_steps=20_000, save_every=1_000, smoke=False) == "validate_and_save"
+    assert validation_action(1_000, total_steps=20_000, save_every=1_000, smoke=True) is None
 
 
 def _normalization() -> DualExpertNormalization:
