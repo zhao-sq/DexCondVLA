@@ -8,6 +8,7 @@ set -euo pipefail
 
 BENCH2DEX_ROOT="${BENCH2DEX_ROOT:-/mnt/ssd1/szhao/DexTool/Bench2Dex}"
 ISAAC_PYTHON="${ISAAC_PYTHON:-/mnt/ssd1/szhao/DexTool/bench2dex_isaaclab_env/bin/python}"
+ISAACLAB_ROOT="${ISAACLAB_ROOT:-/mnt/ssd1/szhao/DexTool/IsaacLab-2.3.2}"
 REPO_ROOT="${REPO_ROOT:-/home/shuqi/DexCondVLA}"
 ANCHOR_DIR="${ANCHOR_DIR:-/mnt/ssd1/szhao/DexTool/bench2dex/task26/replay-generalization}"
 PIPELINE_MODE="${PIPELINE_MODE:-absolute}"
@@ -49,6 +50,8 @@ BASE_SEED="${BASE_SEED:-100000000}"
 SOURCE_COLLECT_CONFIG="${SOURCE_COLLECT_CONFIG:-${BENCH2DEX_ROOT}/configs/collect/default.yaml}"
 POLICY_COLLECT_CONFIG="${POLICY_COLLECT_CONFIG:-${ISAAC_TMPDIR}/task26_pi05_three_camera.yaml}"
 FILTER_POLICY_CAMERAS="${FILTER_POLICY_CAMERAS:-1}"
+UNSET_ISAAC_CUDA_VISIBLE_DEVICES="${UNSET_ISAAC_CUDA_VISIBLE_DEVICES:-1}"
+ISAAC_EXPERIENCE="${ISAAC_EXPERIENCE:-isaaclab.python.headless.rendering.kit}"
 
 if [[ -z "${POLICY_CHECKPOINT}" ]]; then
     echo "POLICY_CHECKPOINT is required for PIPELINE_MODE=${PIPELINE_MODE}" >&2
@@ -63,6 +66,9 @@ export DEX2BENCH_RECORD_RES="${DEX2BENCH_RECORD_RES:-480}"
 export DEX2BENCH_RECORD_JPEG="${DEX2BENCH_RECORD_JPEG:-80}"
 export DEX2BENCH_RECORD_STRIDE="${DEX2BENCH_RECORD_STRIDE:-1}"
 export DEX2BENCH_RECORD_CAMS="cam_overhead"
+# Vast instances have no X server. Keep camera sensors and RGB recording, but
+# use their offscreen render products instead of creating an active viewport.
+export DEX2BENCH_HEADLESS_DISABLE_ACTIVE_VIEWPORT="${DEX2BENCH_HEADLESS_DISABLE_ACTIVE_VIEWPORT:-1}"
 export PYTHONUNBUFFERED=1
 
 mkdir -p "${OUTPUT_ROOT}" "${ISAAC_TMPDIR}"
@@ -145,12 +151,24 @@ run_channel() {
             --remote-port "${REMOTE_PORT}"
             --remote-action-representation "${PIPELINE_MODE}"
             --headless
+            --experience "${ISAAC_EXPERIENCE}"
         )
         if [[ "${profile}" != "inv_cov" ]]; then
             args+=(--anchor-dir "${ANCHOR_DIR}")
         fi
 
-        "${ISAAC_PYTHON}" "${args[@]}" 2>&1 | tee "${chunk_dir}/evaluation.log"
+        # Omniverse enumerates Vulkan devices independently from CUDA. On a
+        # single-GPU host, inheriting CUDA_VISIBLE_DEVICES from the policy
+        # server can make those indices disagree. A local multi-GPU fallback
+        # may explicitly preserve the variable to colocate policy and sim.
+        if [[ "${UNSET_ISAAC_CUDA_VISIBLE_DEVICES}" == "1" ]]; then
+            env -u CUDA_VISIBLE_DEVICES "${ISAAC_PYTHON}" "${args[@]}" 2>&1 | tee "${chunk_dir}/evaluation.log"
+        elif [[ "${UNSET_ISAAC_CUDA_VISIBLE_DEVICES}" == "0" ]]; then
+            "${ISAAC_PYTHON}" "${args[@]}" 2>&1 | tee "${chunk_dir}/evaluation.log"
+        else
+            echo "UNSET_ISAAC_CUDA_VISIBLE_DEVICES must be 0 or 1" >&2
+            exit 2
+        fi
         if [[ ! -s "${chunk_dir}/per_episode.jsonl" ]] || \
            [[ $(wc -l < "${chunk_dir}/per_episode.jsonl") -ne ${count} ]]; then
             echo "[eval] ERROR: ${channel_name} ${label} did not produce ${count} results" >&2
